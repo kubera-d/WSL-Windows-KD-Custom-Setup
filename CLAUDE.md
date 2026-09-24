@@ -8,7 +8,11 @@ Dev Control has its own developer guide: `devcontrol/CLAUDE.md`.
 - **Public repo: no personal data.** No usernames, home paths (`C:\Users\<name>`, `/home/<name>`),
   hostnames, emails, project names from the maintainer's machine, tokens, cert thumbprints. Paths are
   detected at install time (`Get-LinuxHome`, `[Environment]::GetFolderPath`, `%LOCALAPPDATA%`). Per-user
-  files (`settings.json`, `projects.json`, logs) are git-ignored. Grep before every commit.
+  files (`settings.json`, `projects.json`, logs) are git-ignored. `.env*`, keys, credentials and
+  `*.jsonl` transcripts are ignored too. A pre-commit hook (`tools/check-public.sh`, enabled with
+  `git config core.hooksPath tools/hooks`) blocks private-looking files, API-key patterns and the words in
+  the local, never-committed `.git/private-words` (maintainer's usernames, paths, project folder names).
+  Never bypass it with `--no-verify`.
 - **Never run `wsl --shutdown` / `wsl --terminate`, never kill `code` processes in WSL, and never click-test
   Dev Control's Stop WSL / Quit VS Code for real** - Claude Code usually runs inside Linux VS Code in
   WSL, so any of these kills the session. Restarting `msrdc.exe` is safe (Linux apps survive).

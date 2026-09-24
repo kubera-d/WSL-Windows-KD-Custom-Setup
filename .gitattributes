@@ -10,3 +10,4 @@ linux/** text eol=lf
 *.png binary
 *.ico binary
 *.exe binary
+tools/hooks/* text eol=lf
