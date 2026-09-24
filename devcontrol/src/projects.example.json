@@ -1,0 +1,53 @@
+{
+  "_help": [
+    "Per-project settings. Key = folder name under projectsRoot (settings.json).",
+    "EVERY folder there is listed automatically - this file only adds metadata to them.",
+    "A folder with no entry here appears in the group 'New' (top of the list) until you group or hide it.",
+    "  group       section in the list; 'groups' below sets the order, 'collapsed' the ones folded by default.",
+    "  mode        WSL mode for Run (a file name in the modes folder: balanced / coding / lightroom). Omit to use whatever mode WSL is in.",
+    "  pinned      true = Pinned panel + tray 'Run project' menu.     hidden  true = not listed at all.",
+    "  url         shows an Open button (browser).                  warning  text shown on the card.",
+    "  compose     false = never run docker compose here. true = allow it even for a worktree / shared compose name.",
+    "  composeDir  subfolder holding the compose file.              services  only start these compose services.",
+    "  openVSCode  default true: Run opens VS Code (settings codeFlavor: linux or windows) on the folder.",
+    "  tools       commands run in the folder (or its 'cwd') after compose up, in order:",
+    "                { \"name\": \"Migrate\", \"command\": \"docker compose exec -T app alembic upgrade head\" }   runs once, must succeed",
+    "                { \"name\": \"Dev server\", \"command\": \"npm run dev\", \"cwd\": \"web\", \"background\": true }   kept running, listed under the project",
+    "                optional \"stop\": \"...\" command, run by the project's Stop.",
+    "              Background tools stop on Stop / Stop WSL; logs in ~/.cache/devcontrol/run/<project>/.",
+    "Git worktrees are detected automatically, grouped under their repo, and never compose'd.",
+    "The projects below are examples - rename them to your own folder names, or delete them.",
+    "Click Reload in the app after editing."
+  ],
+  "groups": ["Active", "Tools", "Archive"],
+  "collapsed": ["Archive"],
+  "projects": {
+    "my-web-app": {
+      "group": "Active", "mode": "coding", "pinned": true,
+      "url": "http://127.0.0.1:3000",
+      "tools": [
+        { "name": "Migrate", "command": "docker compose exec -T app ./migrate.sh", "timeoutSeconds": 300 },
+        { "name": "Frontend dev server", "command": "npm run dev", "cwd": "frontend", "background": true }
+      ]
+    },
+    "api-service": {
+      "group": "Active",
+      "composeDir": "deploy",
+      "services": ["db", "redis"],
+      "url": "http://127.0.0.1:8000/docs",
+      "warning": "Run starts only the local database and cache; the API itself runs in production."
+    },
+    "api-service-feature-x": {
+      "compose": false,
+      "warning": "Git worktree of api-service: its compose name is the main checkout's, so compose is disabled here."
+    },
+    "background-worker": {
+      "group": "Tools", "openVSCode": false,
+      "tools": [
+        { "name": "worker", "command": "systemctl --user start my-worker", "stop": "systemctl --user stop my-worker" }
+      ]
+    },
+    "old-prototype": { "group": "Archive" },
+    "scratch": { "hidden": true }
+  }
+}

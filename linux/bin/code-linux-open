@@ -1,0 +1,22 @@
+#!/bin/sh
+# Installed by WSL-Windows-KD-Custom-Setup (linux/bin/code-linux-open).
+# code-linux-open - open a folder given as a WINDOWS path in Linux VS Code.
+# Used by the Explorer right-click entry (passes %V) and the "VS Code (Linux)" shortcuts.
+# wsl.exe --cd rejects \\wsl.localhost\... paths, and the backslashes of a UNC path can arrive
+# collapsed, so every form is accepted:
+#   \\wsl.localhost\<distro>\x  \\wsl$\<distro>\x  (or with collapsed slashes)  ->  /x
+#   C:\Users\...                                                                  ->  /mnt/c/Users/...
+#   /already/a/linux/path                                                         ->  unchanged
+# No argument: reopen whatever VS Code had open last.
+bin="$(dirname "$0")"
+[ -z "$1" ] && exec "$bin/code-linux"
+p=$(printf '%s' "$1" | tr '\\' '/')
+case "$p" in
+  */wsl.localhost/*|*/wsl\$/*|wsl.localhost/*|wsl\$/*)
+    dir="/$(printf '%s' "$p" | sed -E 's#^/*wsl(\.localhost|\$)/[^/]+/?##')" ;;
+  [A-Za-z]:/*|[A-Za-z]:) dir=$(wslpath -u "$1") ;;
+  /*) dir="$p" ;;
+  *) dir="$HOME" ;;
+esac
+cd "$dir" 2>/dev/null || cd "$HOME"
+exec "$bin/code-linux" .

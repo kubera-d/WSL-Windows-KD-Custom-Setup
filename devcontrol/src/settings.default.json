@@ -1,0 +1,15 @@
+{
+  "distro": "",
+  "projectsRoot": "",
+  "modesDir": "modes",
+  "wslConfigPath": "%USERPROFILE%\\.wslconfig",
+  "codePath": "",
+  "codeFlavor": "linux",
+  "trayIcon": true,
+  "minimizeToTray": true,
+  "closeToTray": false,
+  "keepAlive": true,
+  "statusRefreshSeconds": 3,
+  "containerRefreshSeconds": 10,
+  "projectRefreshSeconds": 30
+}

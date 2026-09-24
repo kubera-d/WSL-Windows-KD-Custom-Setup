@@ -1,0 +1,314 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Dev Control" Width="1100" Height="740" MinWidth="900" MinHeight="560"
+        WindowStartupLocation="CenterScreen" Background="#17181C" Foreground="#E6E6E6"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Panel" Color="#212329"/>
+    <SolidColorBrush x:Key="Row" Color="#282B32"/>
+    <SolidColorBrush x:Key="Line" Color="#33363E"/>
+    <SolidColorBrush x:Key="Muted" Color="#9AA0A6"/>
+    <SolidColorBrush x:Key="Accent" Color="#3B82F6"/>
+
+    <Style x:Key="Btn" TargetType="Button">
+      <Setter Property="Foreground" Value="#E6E6E6"/>
+      <Setter Property="Background" Value="#343842"/>
+      <Setter Property="BorderBrush" Value="#434854"/>
+      <Setter Property="Padding" Value="12,6"/>
+      <Setter Property="Margin" Value="0,0,6,0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1" CornerRadius="5" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.85"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.7"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BtnPrimary" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="#2563EB"/><Setter Property="BorderBrush" Value="#3B82F6"/><Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style x:Key="BtnDanger" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="#7F1D1D"/><Setter Property="BorderBrush" Value="#B91C1C"/><Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style x:Key="BtnSmall" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Padding" Value="9,3"/><Setter Property="FontSize" Value="12"/>
+    </Style>
+    <Style x:Key="BtnSmallPrimary" TargetType="Button" BasedOn="{StaticResource BtnSmall}">
+      <Setter Property="Background" Value="#2563EB"/><Setter Property="BorderBrush" Value="#3B82F6"/><Setter Property="Foreground" Value="White"/>
+    </Style>
+    <BooleanToVisibilityConverter x:Key="B2V"/>
+    <Style x:Key="BtnSmallDanger" TargetType="Button" BasedOn="{StaticResource BtnSmall}">
+      <Setter Property="Background" Value="#5B1A1A"/><Setter Property="BorderBrush" Value="#8B2525"/>
+    </Style>
+
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource Panel}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="14"/>
+      <Setter Property="Margin" Value="0,0,0,12"/>
+    </Style>
+    <Style x:Key="Pill" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource Panel}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="14"/>
+      <Setter Property="Padding" Value="12,5"/>
+      <Setter Property="Margin" Value="8,0,0,0"/>
+    </Style>
+    <Style x:Key="H" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Margin" Value="0,0,0,10"/>
+    </Style>
+    <Style x:Key="Hint" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/><Setter Property="FontSize" Value="12"/><Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+
+    <Style TargetType="ComboBox">
+      <Setter Property="Padding" Value="8,5"/>
+    </Style>
+  </Window.Resources>
+
+  <Grid Margin="16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="150"/>
+    </Grid.RowDefinitions>
+
+    <!-- Header -->
+    <DockPanel Grid.Row="0" Margin="0,0,0,14" LastChildFill="False">
+      <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
+        <Image x:Name="AppIcon" Width="30" Height="30" Margin="0,0,10,0"/>
+        <TextBlock Text="Dev Control" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+      </StackPanel>
+      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+        <Border Style="{StaticResource Pill}">
+          <StackPanel Orientation="Horizontal">
+            <Ellipse x:Name="WslDot" Width="9" Height="9" Fill="#6B7280" Margin="0,0,7,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="WslText" Text="WSL: ..." FontWeight="SemiBold"/>
+          </StackPanel>
+        </Border>
+        <Border Style="{StaticResource Pill}" ToolTip="Working set of the VmmemWSL process">
+          <TextBlock x:Name="MemText" Text="Memory: -"/>
+        </Border>
+        <Border x:Name="ModePill" Style="{StaticResource Pill}" ToolTip="Mode in %USERPROFILE%\.wslconfig (applies at next WSL start)">
+          <TextBlock x:Name="ModeText" Text="Mode: -"/>
+        </Border>
+        <Border Style="{StaticResource Pill}" ToolTip="What the running VM actually has">
+          <TextBlock x:Name="LiveText" Text="Live: -" Foreground="{StaticResource Muted}"/>
+        </Border>
+      </StackPanel>
+    </DockPanel>
+
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="320"/>
+        <ColumnDefinition Width="16"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- Left column -->
+      <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+          <Border Style="{StaticResource Card}">
+            <StackPanel>
+              <TextBlock Style="{StaticResource H}" Text="WSL"/>
+              <TextBlock Style="{StaticResource Hint}" Text="Mode" Margin="0,0,0,4"/>
+              <ComboBox x:Name="ModeCombo" Margin="0,0,0,10"/>
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="StartBtn" Style="{StaticResource BtnPrimary}" Content="Start WSL"
+                        ToolTip="Boot WSL. With a mode picked, that mode file is copied to .wslconfig first; with no mode, WSL starts on the current .wslconfig."/>
+                <Button x:Name="StopWslBtn" Style="{StaticResource BtnDanger}" Content="Stop WSL"
+                        ToolTip="Runs wsl --shutdown: frees the VM's memory and CPU, stops all containers and tools"/>
+              </StackPanel>
+              <TextBlock x:Name="ModeHint" Style="{StaticResource Hint}" Margin="0,10,0,0"
+                         Text="Start copies the mode file to .wslconfig, then boots WSL (no mode = start as configured). Stop WSL runs wsl --shutdown."/>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource Card}">
+            <StackPanel>
+              <TextBlock Style="{StaticResource H}" Text="VS Code"/>
+              <TextBlock x:Name="CodeText" Style="{StaticResource Hint}" Text="VS Code: -" Margin="0,0,0,10"/>
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="CodeOpenBtn" Style="{StaticResource Btn}" Content="Open (no folder)"
+                        ToolTip="New VS Code window with no project loaded; starts WSL first if it is stopped"/>
+                <Button x:Name="CodeQuitBtn" Style="{StaticResource BtnDanger}" Content="Quit VS Code"
+                        ToolTip="Closes every VS Code window in WSL (terminals and sessions inside them stop). WSL and containers keep running."/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource Card}">
+            <StackPanel>
+              <DockPanel Margin="0,0,0,10">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                  <Button x:Name="EditConfigBtn" Style="{StaticResource BtnSmall}" Content="Edit" ToolTip="Open projects.json in Notepad (modes, pins, tools)"/>
+                  <Button x:Name="ReloadConfigBtn" Style="{StaticResource BtnSmall}" Content="Reload" Margin="0"/>
+                </StackPanel>
+                <TextBlock Style="{StaticResource H}" Text="Pinned" Margin="0"/>
+              </DockPanel>
+              <ItemsControl x:Name="PinnedList">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Border Background="{StaticResource Row}" CornerRadius="6" Padding="10,8" Margin="0,0,0,8">
+                      <DockPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                          <Button Style="{StaticResource BtnPrimary}" Uid="run" Tag="{Binding Name}" Content="Run" IsEnabled="{Binding CanRun}" Padding="14,6"/>
+                          <Button Style="{StaticResource Btn}" Uid="stop" Tag="{Binding Name}" Content="Stop" IsEnabled="{Binding CanAct}" Margin="0"/>
+                        </StackPanel>
+                        <StackPanel VerticalAlignment="Center">
+                          <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                          <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                            <Ellipse Width="7" Height="7" Fill="{Binding StatusColor}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding ShortStatus}" Foreground="#9AA0A6" FontSize="11"/>
+                          </StackPanel>
+                        </StackPanel>
+                      </DockPanel>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <TextBlock x:Name="PinnedHint" Style="{StaticResource Hint}" Text=""/>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+
+      <!-- Right column: projects with their containers and tools -->
+      <Border Grid.Column="2" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="8" Padding="12">
+        <DockPanel>
+          <DockPanel DockPanel.Dock="Top" Margin="2,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <CheckBox x:Name="ShowHiddenBox" Content="Show hidden" Foreground="#9AA0A6" VerticalAlignment="Center" Margin="0,0,12,0"/>
+              <Button x:Name="RefreshBtn" Style="{StaticResource BtnSmall}" Content="Refresh"/>
+              <Button x:Name="StopAllBtn" Style="{StaticResource BtnSmallDanger}" Content="Stop all containers" Margin="0"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Style="{StaticResource H}" Text="Projects" Margin="0"/>
+              <TextBlock x:Name="ProjectsHint" Style="{StaticResource Hint}" Text=""/>
+            </StackPanel>
+          </DockPanel>
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <ItemsControl x:Name="ProjectList" AllowDrop="True">
+              <ItemsControl.GroupStyle>
+                <GroupStyle>
+                  <GroupStyle.ContainerStyle>
+                    <Style TargetType="GroupItem">
+                      <Setter Property="Template">
+                        <Setter.Value>
+                          <ControlTemplate TargetType="GroupItem">
+                            <Expander IsExpanded="{Binding Items[0].GroupExpanded, Mode=OneTime}" Tag="{Binding Name}" Margin="0,0,0,8" Foreground="#E6E6E6">
+                              <Expander.Header>
+                                <StackPanel Orientation="Horizontal">
+                                  <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Foreground="#C8CCD2"/>
+                                  <TextBlock Text="{Binding ItemCount, StringFormat=' ({0})'}" Foreground="#6B7280"/>
+                                  <Button Style="{StaticResource BtnSmall}" Uid="groupmenu" Tag="{Binding Name}" Content="&#xE712;" FontFamily="Segoe MDL2 Assets"
+                                          FontSize="10" Padding="6,2" Margin="8,0,0,0" ToolTip="Rename, reorder or ungroup this group (drop a project here to move it in)"/>
+                                </StackPanel>
+                              </Expander.Header>
+                              <ItemsPresenter Margin="0,8,0,0"/>
+                            </Expander>
+                          </ControlTemplate>
+                        </Setter.Value>
+                      </Setter>
+                    </Style>
+                  </GroupStyle.ContainerStyle>
+                </GroupStyle>
+              </ItemsControl.GroupStyle>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border Background="{StaticResource Row}" CornerRadius="6" Padding="12,10" Margin="0,0,0,8" Cursor="SizeAll">
+                    <Border.Style>
+                      <Style TargetType="Border">
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding IsHiddenRow}" Value="True"><Setter Property="Opacity" Value="0.5"/></DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </Border.Style>
+                    <StackPanel>
+                      <DockPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center"
+                                    Visibility="{Binding IsProject, Converter={StaticResource B2V}}">
+                          <Button Style="{StaticResource BtnSmallPrimary}" Uid="run" Tag="{Binding Name}" Content="Run" IsEnabled="{Binding CanRun}"
+                                  Visibility="{Binding ShowRun, Converter={StaticResource B2V}}"
+                                  ToolTip="Start WSL (in the project's mode), compose up, start tools, open VS Code"/>
+                          <Button Style="{StaticResource BtnSmall}" Uid="stop" Tag="{Binding Name}" Content="Stop" IsEnabled="{Binding CanAct}"
+                                  Visibility="{Binding ShowRun, Converter={StaticResource B2V}}" ToolTip="Stop background tools, compose down"/>
+                          <Button Style="{StaticResource BtnSmall}" Uid="restart" Tag="{Binding Name}" Content="Restart" IsEnabled="{Binding CanAct}"
+                                  Visibility="{Binding ShowRun, Converter={StaticResource B2V}}" ToolTip="compose restart, restart background tools"/>
+                          <Button Style="{StaticResource BtnSmall}" Uid="open" Tag="{Binding Name}" Content="Open" ToolTip="{Binding Url}"
+                                  Visibility="{Binding HasUrl, Converter={StaticResource B2V}}"/>
+                          <Button Style="{StaticResource BtnSmall}" Uid="code" Tag="{Binding Name}" Content="VS Code" IsEnabled="{Binding CanCode}"
+                                  ToolTip="Open in VS Code (Remote - WSL); starts WSL first if it is stopped"/>
+                          <Button Style="{StaticResource BtnSmall}" Uid="menu" Tag="{Binding Name}" Content="&#xE712;" FontFamily="Segoe MDL2 Assets" Margin="0"
+                                  ToolTip="Move, group, pin, hide"/>
+                        </StackPanel>
+                        <StackPanel VerticalAlignment="Center">
+                          <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                            <Border Background="#1E3A5F" CornerRadius="3" Padding="6,0" Margin="8,1,0,0" VerticalAlignment="Center"
+                                    Visibility="{Binding HasMode, Converter={StaticResource B2V}}" ToolTip="WSL mode this project runs in">
+                              <TextBlock Text="{Binding Mode}" FontSize="11" Foreground="#93C5FD"/>
+                            </Border>
+                          </StackPanel>
+                          <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                            <Ellipse Width="7" Height="7" Fill="{Binding StatusColor}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding Status}" Foreground="#9AA0A6" FontSize="12"/>
+                          </StackPanel>
+                          <TextBlock Text="{Binding Info}" Foreground="#6B7280" FontSize="11" Margin="13,1,0,0" TextWrapping="Wrap"
+                                     Visibility="{Binding HasInfo, Converter={StaticResource B2V}}"/>
+                          <TextBlock Text="{Binding Warning}" Foreground="#F59E0B" FontSize="11" Margin="13,2,0,0" TextWrapping="Wrap"
+                                     Visibility="{Binding HasWarning, Converter={StaticResource B2V}}"/>
+                        </StackPanel>
+                      </DockPanel>
+                      <ItemsControl ItemsSource="{Binding Children}" Margin="0,8,0,0" Visibility="{Binding HasChildren, Converter={StaticResource B2V}}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate>
+                            <Border BorderBrush="#33363E" BorderThickness="0,1,0,0" Padding="0,5,0,4">
+                              <Grid Margin="4,0,0,0">
+                                <Grid.ColumnDefinitions>
+                                  <ColumnDefinition Width="22"/><ColumnDefinition Width="*"/><ColumnDefinition Width="70"/><ColumnDefinition Width="130"/><ColumnDefinition Width="56"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{Binding Icon}" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="{Binding StatusColor}" VerticalAlignment="Center"/>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                  <TextBlock Text="{Binding Name}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                                  <TextBlock Text="{Binding Detail}" Foreground="#9AA0A6" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                                <TextBlock Grid.Column="2" Text="{Binding Cpu}" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" ToolTip="CPU"/>
+                                <TextBlock Grid.Column="3" Text="{Binding Mem}" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" ToolTip="Memory"/>
+                                <Button Grid.Column="4" Style="{StaticResource BtnSmallDanger}" Uid="child" Tag="{Binding Tag}" Content="Stop" Margin="0"
+                                        HorizontalAlignment="Right" IsEnabled="{Binding CanAct}" Visibility="{Binding HasAction, Converter={StaticResource B2V}}"/>
+                              </Grid>
+                            </Border>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+    </Grid>
+
+    <!-- Activity log -->
+    <Border Grid.Row="2" Margin="0,12,0,0" Background="#101114" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="8">
+      <TextBox x:Name="LogBox" IsReadOnly="True" Background="Transparent" Foreground="#C8CCD2" BorderThickness="0"
+               FontFamily="Consolas" FontSize="12" Padding="10,8" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+    </Border>
+  </Grid>
+</Window>

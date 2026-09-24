@@ -1,0 +1,9 @@
+# DevControl mode "lightroom": copied to %USERPROFILE%\.wslconfig when you switch to it. Adjust memory/processors to your machine's RAM and CPUs.
+[wsl2]
+memory=8GB
+processors=4
+swap=8GB
+networkingMode=mirrored
+
+[experimental]
+autoMemoryReclaim=gradual

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Installed by WSL-Windows-KD-Custom-Setup (linux/bin/code-linux).
+# code-linux - start Linux VS Code under WSLg with the flags that make it usable.
+#   --ozone-platform=wayland : draw through WSLg's Wayland server, not X11. Under X11 the window
+#                              glitches and the mouse pointer is offset (Windows display scaling).
+#   --disable-gpu            : WSLg's GPU path causes redraw glitches.
+# Every launcher (Start Menu / desktop shortcuts, Explorer right-click, Dev Control, `code` in a
+# terminal via the `code` symlink next to this file) goes through here, so the flags live in one place.
+# Windows VS Code stays installed as the rollback.
+
+# Shortcut / right-click launches arrive via `wsl.exe -e` with a bare PATH (no ~/.local/bin), and the
+# `code` CLI tells VS Code not to resolve the login-shell environment itself. Load the login
+# environment so the integrated terminal and extensions find user-installed tools (claude, gh, ...).
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) [ -f "$HOME/.profile" ] && . "$HOME/.profile" ;; esac
+
+# VS Code's bin/code otherwise stops to ask "install VS Code in Windows instead? [y/N]" on stdin,
+# which hangs every launcher that has no terminal.
+export DONT_PROMPT_WSL_INSTALL=1
+
+# Links (sign-in pages, clicked URLs) open in the Windows default browser.
+[ -z "$BROWSER" ] && export BROWSER="$HOME/.local/bin/winbrowser"
+
+exec /usr/share/code/bin/code --ozone-platform=wayland --disable-gpu "$@"

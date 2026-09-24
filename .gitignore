@@ -1,0 +1,15 @@
+# Build outputs and per-user files (never commit personal settings or project lists)
+*.exe
+*.ico
+devcontrol/src/*.png
+settings.json
+projects.json
+presets.json
+*.log
+*.bak
+helper-config.json
+clipboard.png
+
+# Local Claude Code / editor state
+.claude/settings.local.json
+.vscode/

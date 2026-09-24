@@ -1,0 +1,9 @@
+# DevControl mode "balanced": copied to %USERPROFILE%\.wslconfig when you switch to it. Adjust memory/processors to your machine's RAM and CPUs.
+[wsl2]
+memory=10GB
+processors=6
+swap=8GB
+networkingMode=mirrored
+
+[experimental]
+autoMemoryReclaim=gradual

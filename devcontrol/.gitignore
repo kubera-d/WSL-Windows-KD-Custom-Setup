@@ -1,0 +1,11 @@
+# Build outputs (Install.ps1 generates them in the install folder; never commit them)
+*.exe
+*.ico
+*.png
+*.new
+
+# Per-user files, seeded by Deploy.ps1 from settings.default.json / projects.example.json
+settings.json
+projects.json
+projects.json.bak
+presets.json

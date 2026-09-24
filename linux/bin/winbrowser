@@ -1,0 +1,10 @@
+#!/bin/sh
+# Installed by WSL-Windows-KD-Custom-Setup (linux/bin/winbrowser).
+# winbrowser - open a URL in the WINDOWS default browser (a minimal wslview; wslu is not packaged
+# for every Ubuntu release). Only web/mail URLs: rundll32's FileProtocolHandler would also open or
+# run a local file, so anything else is refused rather than handed to Windows.
+case "$1" in
+  http://*|https://*|mailto:*)
+    exec "$(wslpath -u 'C:\Windows\System32')/rundll32.exe" url.dll,FileProtocolHandler "$1" ;;
+  *) echo "winbrowser: refusing non-web URL: $1" >&2; exit 2 ;;
+esac
