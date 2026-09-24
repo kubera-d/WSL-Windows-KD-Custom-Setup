@@ -442,14 +442,19 @@ function Get-DcCodeFlavor {
 }
 
 # An empty $Project opens a new window with no folder loaded ("-n"), from $HOME.
-function Open-DcVSCode([string]$Project) {
+# $Flavor 'linux' / 'windows' picks the editor for this call (the Linux / Windows buttons); empty =
+# the codeFlavor setting. Windows VS Code with no project opens a plain LOCAL window (no WSL needed);
+# with a project it opens the Linux folder through Remote - WSL.
+function Open-DcVSCode([string]$Project, [string]$Flavor) {
     $s = Get-DcSettings
     $path = ''
     if ($Project) {
         Assert-DcProjectName $Project
         $path = "$(Get-DcProjectsRoot)/$Project"
     }
-    $linux = (Get-DcCodeFlavor) -eq 'linux'
+    if ($Flavor -notin @('linux', 'windows')) { $Flavor = Get-DcCodeFlavor }
+    $linux = $Flavor -eq 'linux'
+    $label = if ($linux) { 'Linux' } else { 'Windows' }
     if ($linux) {
         # exit 127 = launcher missing (reported below instead of a silent failure)
         $launch = "[ -x `"`$HOME/.local/bin/code-linux`" ] || exit 127`n"
@@ -458,17 +463,20 @@ function Open-DcVSCode([string]$Project) {
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
         Write-DcCallLog 'CODE' ("linux " + $(if ($path) { $path } else { '-n (no folder)' }))
         $p = Start-DcDetached 'wsl.exe' "-d $($s.distro) -- bash -lc `"echo $b64 | base64 -d | bash`""
+    } elseif ($path) {
+        $code = Get-DcCodePath
+        Write-DcCallLog 'CODE' "windows --remote wsl+$($s.distro) `"$path`""
+        $p = Start-DcDetached 'cmd.exe' "/d /c `"`"$code`" --remote wsl+$($s.distro) `"$path`"`""
     } else {
         $code = Get-DcCodePath
-        $target = if ($path) { "`"$path`"" } else { '-n' }
-        Write-DcCallLog 'CODE' "--remote wsl+$($s.distro) $target"
-        $p = Start-DcDetached 'cmd.exe' "/d /c `"`"$code`" --remote wsl+$($s.distro) $target`""
+        Write-DcCallLog 'CODE' 'windows -n (local, no folder)'
+        $p = Start-DcDetached 'cmd.exe' "/d /c `"`"$code`" -n`""
     }
     if ($p.WaitForExit(20000) -and $p.ExitCode -ne 0) {
-        if ($linux -and $p.ExitCode -eq 127) { throw '~/.local/bin/code-linux was not found in WSL - install it (the repo''s Linux setup does) or set "codeFlavor": "windows" in settings.json' }
+        if ($linux -and $p.ExitCode -eq 127) { throw '~/.local/bin/code-linux was not found in WSL - install it (the repo''s Linux setup does), or use the Windows VS Code button' }
         throw "code exited with $($p.ExitCode)"
     }
-    if ($path) { "Opened $path in VS Code." } else { 'Opened an empty VS Code window.' }
+    if ($path) { "Opened $path in VS Code ($label)." } else { "Opened an empty VS Code window ($label)." }
 }
 
 # Linux VS Code processes all report comm 'code'; the ROOTS (parent is not itself a code

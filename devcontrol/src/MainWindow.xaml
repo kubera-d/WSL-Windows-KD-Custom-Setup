@@ -77,6 +77,26 @@
     <Style TargetType="ComboBox">
       <Setter Property="Padding" Value="8,5"/>
     </Style>
+
+    <!-- Editor icons (16x16 vector): Linux penguin and Windows logo -->
+    <DrawingImage x:Key="IconLinux">
+      <DrawingImage.Drawing>
+        <DrawingGroup>
+          <GeometryDrawing Brush="#1B1B1B" Geometry="M8,0.6 C5.1,0.6 4.3,3 4.3,5.1 C4.3,6.9 3.1,8.1 2.5,9.9 C1.9,11.8 2.3,13.9 3.6,15 L12.4,15 C13.7,13.9 14.1,11.8 13.5,9.9 C12.9,8.1 11.7,6.9 11.7,5.1 C11.7,3 10.9,0.6 8,0.6 Z">
+            <GeometryDrawing.Pen><Pen Brush="#C8C8C8" Thickness="0.7"/></GeometryDrawing.Pen>
+          </GeometryDrawing>
+          <GeometryDrawing Brush="#F4F4F4" Geometry="M8,6.3 C6.3,6.3 5.3,8.5 5.3,10.8 C5.3,13 6.4,14.3 8,14.3 C9.6,14.3 10.7,13 10.7,10.8 C10.7,8.5 9.7,6.3 8,6.3 Z"/>
+          <GeometryDrawing Brush="#F4F4F4" Geometry="M6.1,3.6 a0.85,1.05 0 1,0 1.7,0 a0.85,1.05 0 1,0 -1.7,0 Z M8.2,3.6 a0.85,1.05 0 1,0 1.7,0 a0.85,1.05 0 1,0 -1.7,0 Z"/>
+          <GeometryDrawing Brush="#111111" Geometry="M6.75,3.8 a0.35,0.45 0 1,0 0.7,0 a0.35,0.45 0 1,0 -0.7,0 Z M8.55,3.8 a0.35,0.45 0 1,0 0.7,0 a0.35,0.45 0 1,0 -0.7,0 Z"/>
+          <GeometryDrawing Brush="#F2A900" Geometry="M6.5,5.1 L9.5,5.1 L8,6.6 Z M2.4,15.6 C2.4,14.3 4.2,13.7 5.7,14.6 L6.5,15.6 Z M13.6,15.6 C13.6,14.3 11.8,13.7 10.3,14.6 L9.5,15.6 Z"/>
+        </DrawingGroup>
+      </DrawingImage.Drawing>
+    </DrawingImage>
+    <DrawingImage x:Key="IconWindows">
+      <DrawingImage.Drawing>
+        <GeometryDrawing Brush="#3FA9F5" Geometry="M0.5,0.5 H7.5 V7.5 H0.5 Z M8.5,0.5 H15.5 V7.5 H8.5 Z M0.5,8.5 H7.5 V15.5 H0.5 Z M8.5,8.5 H15.5 V15.5 H8.5 Z"/>
+      </DrawingImage.Drawing>
+    </DrawingImage>
   </Window.Resources>
 
   <Grid Margin="16">
@@ -141,12 +161,25 @@
             <StackPanel>
               <TextBlock Style="{StaticResource H}" Text="VS Code"/>
               <TextBlock x:Name="CodeText" Style="{StaticResource Hint}" Text="VS Code: -" Margin="0,0,0,10"/>
-              <StackPanel Orientation="Horizontal">
-                <Button x:Name="CodeOpenBtn" Style="{StaticResource Btn}" Content="Open (no folder)"
-                        ToolTip="New VS Code window with no project loaded; starts WSL first if it is stopped"/>
-                <Button x:Name="CodeQuitBtn" Style="{StaticResource BtnDanger}" Content="Quit VS Code"
-                        ToolTip="Closes every VS Code window in WSL (terminals and sessions inside them stop). WSL and containers keep running."/>
-              </StackPanel>
+              <TextBlock Style="{StaticResource Hint}" Text="Open a new window (no folder):" Margin="0,0,0,4"/>
+              <WrapPanel>
+                <Button x:Name="CodeOpenBtn" Style="{StaticResource Btn}" Margin="0,0,6,6"
+                        ToolTip="New Linux VS Code window (runs in WSL through WSLg); starts WSL first if it is stopped">
+                  <StackPanel Orientation="Horizontal">
+                    <Image Source="{StaticResource IconLinux}" Width="16" Height="16" Margin="0,0,6,0"/>
+                    <TextBlock Text="Linux VS Code" VerticalAlignment="Center"/>
+                  </StackPanel>
+                </Button>
+                <Button x:Name="CodeOpenWinBtn" Style="{StaticResource Btn}" Margin="0,0,6,6"
+                        ToolTip="New Windows VS Code window (local Windows app; does not need WSL)">
+                  <StackPanel Orientation="Horizontal">
+                    <Image Source="{StaticResource IconWindows}" Width="16" Height="16" Margin="0,0,6,0"/>
+                    <TextBlock Text="Windows VS Code" VerticalAlignment="Center"/>
+                  </StackPanel>
+                </Button>
+                <Button x:Name="CodeQuitBtn" Style="{StaticResource BtnDanger}" Content="Quit Linux VS Code" Margin="0,0,6,6"
+                        ToolTip="Closes every Linux VS Code window in WSL (terminals and sessions inside them stop). WSL, containers and Windows VS Code keep running."/>
+              </WrapPanel>
             </StackPanel>
           </Border>
 
@@ -250,8 +283,14 @@
                                   Visibility="{Binding ShowRun, Converter={StaticResource B2V}}" ToolTip="compose restart, restart background tools"/>
                           <Button Style="{StaticResource BtnSmall}" Uid="open" Tag="{Binding Name}" Content="Open" ToolTip="{Binding Url}"
                                   Visibility="{Binding HasUrl, Converter={StaticResource B2V}}"/>
-                          <Button Style="{StaticResource BtnSmall}" Uid="code" Tag="{Binding Name}" Content="VS Code" IsEnabled="{Binding CanCode}"
-                                  ToolTip="Open in VS Code (Remote - WSL); starts WSL first if it is stopped"/>
+                          <Button Style="{StaticResource BtnSmall}" Uid="code" Tag="{Binding Name}" IsEnabled="{Binding CanCode}" Padding="7,3"
+                                  ToolTip="Open in Linux VS Code (WSLg); starts WSL first if it is stopped">
+                            <Image Source="{StaticResource IconLinux}" Width="15" Height="15"/>
+                          </Button>
+                          <Button Style="{StaticResource BtnSmall}" Uid="codewin" Tag="{Binding Name}" IsEnabled="{Binding CanCode}" Padding="7,3"
+                                  ToolTip="Open in Windows VS Code (Remote - WSL); starts WSL first if it is stopped">
+                            <Image Source="{StaticResource IconWindows}" Width="15" Height="15"/>
+                          </Button>
                           <Button Style="{StaticResource BtnSmall}" Uid="menu" Tag="{Binding Name}" Content="&#xE712;" FontFamily="Segoe MDL2 Assets" Margin="0"
                                   ToolTip="Move, group, pin, hide"/>
                         </StackPanel>

@@ -23,8 +23,9 @@ so it keeps working after `wsl --shutdown`, and it never wakes WSL up by acciden
   If WSL is running in another mode it asks before restarting. With no mode picked it just boots on
   the current `.wslconfig`. A `.wslconfig` that matches no mode is backed up before it is replaced.
 - **Stop WSL**: asks, then runs `wsl --shutdown` (frees the VM's memory and CPU).
-- **VS Code** card: **Open (no folder)** starts an empty window (booting WSL first if needed);
-  **Quit VS Code** closes every VS Code window inside WSL (SIGTERM, SIGKILL after 20 s).
+- **VS Code** card: **Linux VS Code** (penguin) opens an empty Linux VS Code window, booting WSL first if needed;
+  **Windows VS Code** (Windows logo) opens an empty local Windows VS Code window (no WSL needed);
+  **Quit Linux VS Code** closes every VS Code window inside WSL (SIGTERM, SIGKILL after 20 s).
 - **Projects**: every folder under `projectsRoot` (a Linux path) is listed and grouped;
   `projects.json` only adds metadata. Each card shows its compose containers **and** background
   tools nested underneath, with CPU/RAM and a Stop button.
@@ -34,11 +35,12 @@ so it keeps working after `wsl --shutdown`, and it never wakes WSL up by acciden
     cancel) > `docker compose up -d` (optionally only some `services`) > run its `tools` > open VS Code.
   - **Stop**: stop background tools and tool `stop` commands > `docker compose down`.
     **Restart**: compose restart + restart background tools.
-  - **Open** (the project's `url`), **VS Code** (starts WSL first if needed).
+  - **Open** (the project's `url`), and two editor buttons: penguin = open the folder in Linux VS Code,
+    Windows logo = open it in Windows VS Code via Remote - WSL (both start WSL first if needed).
   - **Pinned** projects get big Run/Stop buttons on the left and in the tray menu.
 - **Stop all containers**, plus an "Other containers" group for containers of no listed project.
-- **Tray icon**: Open, Run project (pinned), Start WSL (per mode), Stop WSL, Open VS Code, Quit
-  VS Code in WSL, Exit. Minimizing hides to the tray.
+- **Tray icon**: Open, Run project (pinned), Start WSL (per mode), Stop WSL, Open Linux VS Code,
+  Open Windows VS Code, Quit Linux VS Code, Exit. Minimizing hides to the tray.
 
 ### Arranging projects (saved, restored every time)
 - **Drag** a card onto another card to reorder (top/bottom half = before/after), or onto a
@@ -91,7 +93,7 @@ Restart the app after editing.
 | `projectsRoot` | `""` (Deploy.ps1 fills it) | Linux folder whose subfolders are projects. Empty = the app shows "set projectsRoot in settings.json". |
 | `modesDir` | `modes` | Folder of `<mode>.wslconfig` files. `%VARS%` are expanded; relative paths are relative to the app folder. |
 | `wslConfigPath` | `%USERPROFILE%\.wslconfig` | The file a mode is copied to. |
-| `codeFlavor` | `linux` | `linux`: Linux VS Code under WSLg via `~/.local/bin/code-linux`. `windows`: Windows VS Code `--remote wsl+<distro>`. |
+| `codeFlavor` | `linux` | Editor used by **Run** (the per-project buttons pick explicitly). `linux`: Linux VS Code under WSLg via `~/.local/bin/code-linux`. `windows`: Windows VS Code `--remote wsl+<distro>`. |
 | `codePath` | `""` | Path to Windows `code.cmd` (windows flavor), when it is not on PATH. |
 | `trayIcon` / `minimizeToTray` / `closeToTray` | `true` / `true` / `false` | Tray behavior. |
 | `keepAlive` | `true` | Holds a hidden `wsl.exe ... sleep infinity` session so WSL does not idle out when you close terminals. `wsl --shutdown` ends it. |

@@ -285,10 +285,11 @@ function Update-Enablement {
     $ui.RefreshBtn.IsEnabled = $idle -and $run
     $ui.StopAllBtn.IsEnabled = $idle -and $run -and $script:Containers.Count -gt 0
     $ui.CodeOpenBtn.IsEnabled = $free
+    $ui.CodeOpenWinBtn.IsEnabled = $true
     $ui.CodeQuitBtn.IsEnabled = $free -and $run -and $script:VSCodeCount -gt 0
-    $ui.CodeText.Text = if (-not $run) { 'WSL is stopped, so VS Code is not running in it.' }
-        elseif ($script:VSCodeCount -gt 0) { "Running in WSL: $($script:VSCodeCount) instance(s)." }
-        else { 'Not running in WSL.' }
+    $ui.CodeText.Text = if (-not $run) { 'WSL is stopped, so Linux VS Code is not running.' }
+        elseif ($script:VSCodeCount -gt 0) { "Linux VS Code running in WSL: $($script:VSCodeCount) instance(s)." }
+        else { 'Linux VS Code is not running.' }
     if ($script:TrayItems.Stop) { $script:TrayItems.Stop.Enabled = $free -and $run }
     if ($script:TrayItems.Start) { $script:TrayItems.Start.Enabled = $free }
     if ($script:TrayItems.Run) { $script:TrayItems.Run.Enabled = $free }
@@ -590,9 +591,11 @@ function Get-SequenceSteps([string]$Kind, [string]$Name) {
             foreach ($t in $tools) { $steps += @{ Type = 'tool'; Tool = $t; Text = "tool: $($t.name)" } }
             if (Get-CfgValue $cfg 'openVSCode' $true) { $steps += @{ Type = 'code'; Text = 'opening VS Code' } }
         }
-        'code' {
+        { $_ -in @('code', 'codewin') } {
+            # Both editors open the Linux folder (Windows VS Code through Remote - WSL), so WSL comes first.
+            $fl = if ($Kind -eq 'codewin') { 'windows' } else { 'linux' }
             if (-not $script:State.Running) { $steps += @{ Type = 'wsl'; Mode = $mode; Text = 'starting WSL' } }
-            $steps += @{ Type = 'code'; Text = 'opening VS Code' }
+            $steps += @{ Type = 'code'; Flavor = $fl; Text = "opening $(if ($fl -eq 'windows') { 'Windows' } else { 'Linux' }) VS Code" }
         }
         'stop' {
             $steps += @{ Type = 'stopTools'; Text = 'stopping tools' }
@@ -611,7 +614,7 @@ function Get-SequenceSteps([string]$Kind, [string]$Name) {
 function Start-Sequence([string]$Kind, [string]$Name) {
     if ($script:Seq) { Log "Busy: '$($script:Seq.Label)' is still running."; return }
     if ($script:Busy -or $script:PendingLifecycle) { Log 'A WSL start/shutdown is in progress.'; return }
-    if ($Kind -notin @('run', 'code') -and -not $script:State.Running) { Log "WSL is stopped - nothing to $Kind."; return }
+    if ($Kind -notin @('run', 'code', 'codewin') -and -not $script:State.Running) { Log "WSL is stopped - nothing to $Kind."; return }
     $steps = Get-SequenceSteps $Kind $Name
     $script:Seq = @{ Label = "$Kind $Name"; Name = $Name; Steps = $steps; Index = 0 }
     Log "== $Kind $Name ($(@($steps | ForEach-Object { $_.Text }) -join ' > '))"
@@ -646,7 +649,7 @@ function Invoke-NextStep {
         'toolStop'  { Invoke-ToolStopStep $q.Name $st.Tool }
         'tool'      { Invoke-ToolStep $q.Name $st.Tool }
         'stopTools' { Invoke-StopTools (Get-DcSlug $q.Name) '' $script:StepDone }
-        'code'      { Open-Code $q.Name $script:StepDone }
+        'code'      { Open-Code $q.Name $script:StepDone $st.Flavor }
     }
 }
 
@@ -691,10 +694,11 @@ function Invoke-StopTools([string]$Slug, [string]$ToolSlug, [scriptblock]$Then) 
     }
 }
 
-# An empty $Name opens a window with no folder loaded.
-function Open-Code([string]$Name, [scriptblock]$Then) {
-    Log $(if ($Name) { "Opening $Name in VS Code..." } else { 'Opening an empty VS Code window...' })
-    Start-Bg -Name "code:$Name" -Kind 'action' -Work { param($n) Open-DcVSCode $n } -ArgList @($Name) -Context @{ Then = $Then } -Done {
+# An empty $Name opens a window with no folder loaded. $Flavor: 'linux' / 'windows' / '' (= codeFlavor setting).
+function Open-Code([string]$Name, [scriptblock]$Then, [string]$Flavor) {
+    $which = switch ($Flavor) { 'windows' { 'Windows VS Code' } 'linux' { 'Linux VS Code' } default { 'VS Code' } }
+    Log $(if ($Name) { "Opening $Name in $which..." } else { "Opening an empty $which window..." })
+    Start-Bg -Name "code:$Name" -Kind 'action' -Work { param($n, $f) Open-DcVSCode $n $f } -ArgList @($Name, $Flavor) -Context @{ Then = $Then } -Done {
         param($r, $e, $c)
         if ($e) { Log "VS Code failed: $($e.Message)" } else { Log ($r -join ' ') }
         Update-Runtime
@@ -702,11 +706,13 @@ function Open-Code([string]$Name, [scriptblock]$Then) {
     }
 }
 
-# VS Code with no folder. Both flavors run in / connect to Linux, so WSL has to be up first.
-function Open-EmptyCode {
+# VS Code with no folder. Linux VS Code runs in WSL, so WSL has to be up first; Windows VS Code opens
+# a plain local window and needs neither WSL nor an idle app.
+function Open-EmptyCode([string]$Flavor = 'linux') {
+    if ($Flavor -eq 'windows') { Open-Code '' $null 'windows'; return }
     if ($script:Seq -or $script:Busy -or $script:PendingLifecycle) { Log 'Busy - wait for the current operation to finish.'; return }
-    if ($script:State.Running) { Open-Code '' $null; return }
-    Start-WslFlow '' { param($ok) if ($ok) { Open-Code '' $null } }
+    if ($script:State.Running) { Open-Code '' $null 'linux'; return }
+    Start-WslFlow '' { param($ok) if ($ok) { Open-Code '' $null 'linux' } }
 }
 
 # Quits VS Code inside WSL. Containers, background tools and WSL itself keep running.
@@ -1120,9 +1126,11 @@ if ($settings.trayIcon) {
     }
     $script:TrayItems.Stop = New-Object System.Windows.Forms.ToolStripMenuItem 'Stop WSL (free resources)'
     $script:TrayItems.Stop.add_Click({ Stop-WslFlow })
-    $script:TrayItems.CodeOpen = New-Object System.Windows.Forms.ToolStripMenuItem 'Open VS Code (no folder)'
-    $script:TrayItems.CodeOpen.add_Click({ Open-EmptyCode })
-    $script:TrayItems.CodeQuit = New-Object System.Windows.Forms.ToolStripMenuItem 'Quit VS Code in WSL'
+    $script:TrayItems.CodeOpen = New-Object System.Windows.Forms.ToolStripMenuItem 'Open Linux VS Code'
+    $script:TrayItems.CodeOpen.add_Click({ Open-EmptyCode 'linux' })
+    $script:TrayItems.CodeOpenWin = New-Object System.Windows.Forms.ToolStripMenuItem 'Open Windows VS Code'
+    $script:TrayItems.CodeOpenWin.add_Click({ Open-EmptyCode 'windows' })
+    $script:TrayItems.CodeQuit = New-Object System.Windows.Forms.ToolStripMenuItem 'Quit Linux VS Code'
     $script:TrayItems.CodeQuit.add_Click({ Stop-VSCodeFlow })
     $script:TrayItems.Exit = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
     $script:TrayItems.Exit.add_Click({ Exit-App })
@@ -1132,6 +1140,7 @@ if ($settings.trayIcon) {
     [void]$menu.Items.Add($script:TrayItems.Stop)
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     [void]$menu.Items.Add($script:TrayItems.CodeOpen)
+    [void]$menu.Items.Add($script:TrayItems.CodeOpenWin)
     [void]$menu.Items.Add($script:TrayItems.CodeQuit)
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     [void]$menu.Items.Add($script:TrayItems.Exit)
@@ -1145,7 +1154,8 @@ if ($settings.trayIcon) {
 $ui.ModeCombo.ItemsSource = @(Get-DcModes)
 $ui.StartBtn.add_Click({ Start-WslFlow ([string]$ui.ModeCombo.SelectedItem) })
 $ui.StopWslBtn.add_Click({ Stop-WslFlow })
-$ui.CodeOpenBtn.add_Click({ Open-EmptyCode })
+$ui.CodeOpenBtn.add_Click({ Open-EmptyCode 'linux' })
+$ui.CodeOpenWinBtn.add_Click({ Open-EmptyCode 'windows' })
 $ui.CodeQuitBtn.add_Click({ Stop-VSCodeFlow })
 $ui.RefreshBtn.add_Click({ Update-Projects; Update-Runtime })
 $ui.StopAllBtn.add_Click({ Stop-AllContainersFlow })
@@ -1166,6 +1176,7 @@ $projectClick = [Windows.RoutedEventHandler]{
         'stop'    { Start-Sequence 'stop' $tag }
         'restart' { Start-Sequence 'restart' $tag }
         'code'    { Start-Sequence 'code' $tag }
+        'codewin' { Start-Sequence 'codewin' $tag }
         'open'    {
             $u = [string](Get-CfgValue (Get-Cfg $tag) 'url' '')
             if ($u -match '^https?://') { Start-Process $u; Log "Opened $u" } else { Log "No valid url for $tag" }
