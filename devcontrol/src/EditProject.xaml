@@ -1,0 +1,96 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Edit project" Width="640" Height="720" MinWidth="520" MinHeight="420"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="#212329" Foreground="#E6E6E6" FontFamily="Segoe UI" FontSize="13"
+        UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
+  <!-- Styles (Btn, Field, Hint) come from the main window: merged in by Show-EditProject. -->
+  <Window.Resources>
+    <Style x:Key="Label" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#C8CCD2"/><Setter Property="Margin" Value="0,12,0,4"/><Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="Sub" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#9AA0A6"/><Setter Property="FontSize" Value="11"/><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="Margin" Value="0,3,0,0"/>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#E6E6E6"/><Setter Property="Margin" Value="0,8,18,0"/>
+    </Style>
+  </Window.Resources>
+  <DockPanel Margin="18">
+    <DockPanel DockPanel.Dock="Bottom" Margin="0,14,0,0">
+      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+        <Button x:Name="SaveBtn" Content="Save" IsDefault="True" Style="{DynamicResource BtnPrimary}"/>
+        <Button x:Name="CancelBtn" Content="Cancel" IsCancel="True" Style="{DynamicResource Btn}" Margin="0"/>
+      </StackPanel>
+      <TextBlock x:Name="ErrorText" Foreground="#F87171" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,12,0"/>
+    </DockPanel>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel Margin="0,0,8,0">
+        <TextBlock x:Name="FolderText" Foreground="#9AA0A6" FontSize="12" TextWrapping="Wrap"/>
+        <TextBlock x:Name="DetectedText" Foreground="#9AA0A6" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+
+        <TextBlock Style="{StaticResource Label}" Text="Name"/>
+        <TextBox x:Name="NameBox" Style="{DynamicResource Field}"/>
+        <TextBlock Style="{StaticResource Sub}" Text="Shown in Dev Control only. Leave empty to show the folder name. The folder is never renamed."/>
+
+        <TextBlock Style="{StaticResource Label}" Text="Description"/>
+        <TextBox x:Name="DescBox" Style="{DynamicResource Field}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="54"/>
+
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="14"/><ColumnDefinition/></Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0">
+            <TextBlock Style="{StaticResource Label}" Text="Group"/>
+            <ComboBox x:Name="GroupBox" IsEditable="True"/>
+            <TextBlock Style="{StaticResource Sub}" Text="Pick one or type a new name. Empty = Ungrouped."/>
+          </StackPanel>
+          <StackPanel Grid.Column="2">
+            <TextBlock Style="{StaticResource Label}" Text="WSL mode for Run"/>
+            <ComboBox x:Name="ModeBox"/>
+            <TextBlock Style="{StaticResource Sub}" Text="Run asks before restarting WSL in another mode."/>
+          </StackPanel>
+        </Grid>
+
+        <TextBlock Style="{StaticResource Label}" Text="URL"/>
+        <TextBox x:Name="UrlBox" Style="{DynamicResource Field}"/>
+        <TextBlock Style="{StaticResource Sub}" Text="http:// or https:// - adds an Open button to the details."/>
+
+        <TextBlock Style="{StaticResource Label}" Text="Warning"/>
+        <TextBox x:Name="WarnBox" Style="{DynamicResource Field}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="40"/>
+        <TextBlock Style="{StaticResource Sub}" Text="Shown in amber in the details, e.g. 'port 8080 is also used by X'."/>
+
+        <WrapPanel Margin="0,6,0,0">
+          <CheckBox x:Name="PinnedBox" Content="Pinned (left panel and tray menu)"/>
+          <CheckBox x:Name="OpenCodeBox" Content="Run also opens VS Code"/>
+          <CheckBox x:Name="HiddenBox" Content="Hidden"/>
+        </WrapPanel>
+
+        <Expander x:Name="AdvancedExp" Header="Docker Compose and tools" Foreground="#E6E6E6" Margin="0,16,0,0">
+          <StackPanel Margin="4,0,0,0">
+            <TextBlock Style="{StaticResource Label}" Text="Docker Compose"/>
+            <ComboBox x:Name="ComposeBox"/>
+            <TextBlock Style="{StaticResource Sub}" Text="Automatic: Run uses the compose file if there is one, except in git worktrees and folders whose compose name another folder also uses (they would replace each other's containers)."/>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="14"/><ColumnDefinition/></Grid.ColumnDefinitions>
+              <StackPanel Grid.Column="0">
+                <TextBlock Style="{StaticResource Label}" Text="Compose subfolder"/>
+                <TextBox x:Name="ComposeDirBox" Style="{DynamicResource Field}"/>
+                <TextBlock Style="{StaticResource Sub}" Text="If the compose file is not in the project folder itself."/>
+              </StackPanel>
+              <StackPanel Grid.Column="2">
+                <TextBlock Style="{StaticResource Label}" Text="Only these services"/>
+                <TextBox x:Name="ServicesBox" Style="{DynamicResource Field}"/>
+                <TextBlock Style="{StaticResource Sub}" Text="Comma-separated. Empty = all services."/>
+              </StackPanel>
+            </Grid>
+            <TextBlock Style="{StaticResource Label}" Text="Tools (JSON list)"/>
+            <TextBox x:Name="ToolsBox" Style="{DynamicResource Field}" AcceptsReturn="True" AcceptsTab="True" TextWrapping="NoWrap"
+                     FontFamily="Consolas" FontSize="12" MinHeight="110" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"/>
+            <TextBlock Style="{StaticResource Sub}" xml:space="preserve">Commands Run starts after compose, in order. Each needs "name" and "command"; optional "cwd", "background": true (kept running), "stop", "timeoutSeconds".
+[ { "name": "Dev server", "command": "npm run dev", "cwd": "web", "background": true } ]</TextBlock>
+          </StackPanel>
+        </Expander>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

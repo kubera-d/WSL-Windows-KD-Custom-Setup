@@ -106,7 +106,8 @@ Adjust them to your machine's RAM and CPUs, or add your own - every `*.wslconfig
 mode. Comment lines (`#`) are ignored when matching the current `.wslconfig` against the modes.
 
 ## projects.json
-Key = folder name under `projectsRoot`. Example (see `src\projects.example.json`):
+Key = folder name under `projectsRoot`, or any name for a project with a `path` (a project kept
+outside `projectsRoot`, e.g. on the Windows drive). Example (see `src\projects.example.json`):
 
 ```json
 {
@@ -117,13 +118,17 @@ Key = folder name under `projectsRoot`. Example (see `src\projects.example.json`
                      "tools": [ { "name": "Frontend dev server", "command": "npm run dev", "cwd": "frontend", "background": true } ] },
     "api-service": { "group": "Active", "composeDir": "deploy", "services": ["db", "redis"],
                      "warning": "Run starts only the local database and cache." },
-    "scratch":     { "hidden": true }
+    "scratch":     { "hidden": true },
+    "win-tools":   { "path": "C:\\src\\win-tools", "displayName": "Windows tools", "group": "Tools" }
   }
 }
 ```
 
 | Key | Meaning |
 |---|---|
+| `displayName`, `description` | Title shown on the card (default: the key) and a short description. |
+| `path` | Folder of a project outside `projectsRoot`: a Linux path, or a Windows path (`C:\\...`, reached from Linux through `/mnt/c`). A project on a Windows path opens in Windows VS Code locally (no Remote - WSL) unless `codeFlavor` says otherwise. |
+| `codeFlavor` | `linux` / `windows`: the editor this project opens in, overriding the `codeFlavor` setting. |
 | `group`, `order` | Section in the list and position in it (written by drag and drop). |
 | `mode` | Mode Run starts WSL in. Omit to use whatever mode WSL is in. |
 | `pinned` | Pinned panel + tray "Run project" menu. |

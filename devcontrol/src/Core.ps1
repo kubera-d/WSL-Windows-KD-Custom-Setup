@@ -304,6 +304,7 @@ function Get-DcLinuxInfo {
 
 # EVERY folder under projectsRoot is a project (new folders are picked up on the next refresh;
 # projects.json only adds metadata - group, mode, tools, hidden - it is not a list of what exists).
+# Exception: entries with a "path" are listed from that folder (outside projectsRoot, Windows paths via /mnt).
 # Reports the compose file (in the folder, or in its configured composeDir), git-worktree details
 # and last activity so the UI can classify them.
 function Get-DcProjects {
@@ -311,16 +312,18 @@ function Get-DcProjects {
     $cfg = Get-DcProjectConfig
     $cfgLines = @($cfg.Keys | ForEach-Object {
         $sub = if ($cfg[$_].PSObject.Properties['composeDir']) { [string]$cfg[$_].composeDir } else { '' }
-        "$_`t$sub"
+        $pp = Get-DcProjectPath $_ $cfg
+        # 0x1f, not tab: read collapses runs of IFS whitespace, so an empty composeDir would eat the path
+        $_ + [char]0x1f + $sub + [char]0x1f + $(if ($pp) { ConvertTo-DcLinuxPath $pp })
     }) -join "`n"
     $script = @'
 root=__ROOT__
-declare -A sub
-while IFS=$'\t' read -r n s; do [ -n "$n" ] && sub["$n"]="$s"; done <<'CFG'
+declare -A sub xp
+while IFS=$'\x1f' read -r n s p; do [ -n "$n" ] && { sub["$n"]="$s"; [ -n "$p" ] && xp["$n"]="$p"; }; done <<'CFG'
 __CFG__
 CFG
 emit() {
-  local n="$1" d="$root/$1" s cd cf="" cname="" wt="" parent="" br="" dirty="" ahead="" last="" gd pdir pb f
+  local n="$1" d="$2" s cd cf="" cname="" wt="" parent="" br="" dirty="" ahead="" last="" gd pdir pb f
   s="${sub[$n]}"; cd="$d${s:+/$s}"
   for f in __FILES__; do [ -f "$cd/$f" ] && { cf="$cd/$f"; break; }; done
   if [ -n "$cf" ]; then
@@ -338,9 +341,10 @@ emit() {
   fi
   [ -e "$d/.git" ] && last=$(git -C "$d" log -1 --format=%ct 2>/dev/null)
   [ -n "$last" ] || last=$(find "$d" -maxdepth 3 -type f -not -path '*/node_modules/*' -not -path '*/.venv/*' -not -path '*/.git/*' -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)
-  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$cd" "$cf" "$cname" "$wt" "$parent" "$br" "$dirty" "$ahead" "$last"
+  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$cd" "$cf" "$cname" "$wt" "$parent" "$br" "$dirty" "$ahead" "$last" "$d"
 }
-for d in "$root"/*/; do emit "$(basename "$d")"; done
+for d in "$root"/*/; do n=$(basename "$d"); [ -n "${xp[$n]}" ] || emit "$n" "${d%/}"; done
+for n in "${!xp[@]}"; do [ -d "${xp[$n]}" ] && emit "$n" "${xp[$n]}"; done
 printf 'J\t'; docker compose ls --all --format json 2>/dev/null | tr -d '\n'; echo
 '@
     $script = $script.Replace('__ROOT__', (ConvertTo-DcBashLiteral $root)).Replace('__FILES__', ($script:DcComposeFiles -join ' ')).Replace('__CFG__', $cfgLines)
@@ -359,7 +363,7 @@ printf 'J\t'; docker compose ls --all --format json 2>/dev/null | tr -d '\n'; ec
         $f = $_.Split("`t")
         [pscustomobject]@{
             Name        = $f[1]
-            Dir         = "$root/$($f[1])"
+            Dir         = $f[11]
             ComposeDir  = $f[2]
             ComposeFile = $f[3]
             Compose     = [bool]$f[3]
@@ -389,16 +393,40 @@ function Assert-DcProjectName([string]$Project) {
     if (-not $Project -or $Project -match '[/\\]' -or $Project -eq '.' -or $Project -eq '..') { throw "Invalid project name '$Project'" }
 }
 
+# A Windows path (C:\src\x) as Linux sees it (/mnt/c/src/x); Linux paths pass through.
+function ConvertTo-DcLinuxPath([string]$Path) {
+    if ($Path -match '^([A-Za-z]):[\\/]?(.*)$') { return ("/mnt/$($Matches[1].ToLower())/" + ($Matches[2] -replace '\\', '/')).TrimEnd('/') }
+    $Path.TrimEnd('/')
+}
+
+function Test-DcWindowsPath([string]$Path) { $Path -match '^[A-Za-z]:([\\/]|$)' }
+
+# projects.json "path": the folder of a project that lives outside projectsRoot - a Linux path, or a
+# Windows path for a project kept on the Windows drive. '' = the usual <projectsRoot>/<name>.
+function Get-DcProjectPath([string]$Project, $Config = $null) {
+    if ($null -eq $Config) { $Config = Get-DcProjectConfig }
+    $e = $Config[$Project]
+    if ($e -and $e.PSObject.Properties['path'] -and $e.path) { return ([string]$e.path).Trim() }
+    ''
+}
+
+# The project folder as a Linux path (what bash scripts cd into).
+function Get-DcProjectDir([string]$Project) {
+    Assert-DcProjectName $Project
+    $p = Get-DcProjectPath $Project
+    if ($p) { return ConvertTo-DcLinuxPath $p }
+    "$(Get-DcProjectsRoot)/$Project"
+}
+
 # Runs docker compose in a project (or its composeDir). $Services limits up/restart to those services.
 # Refuses up/restart when the compose project name already has containers from ANOTHER folder
 # (e.g. a git worktree whose compose name clashes with the main checkout's) - that would replace them.
 function Invoke-DcCompose([string]$Project, [ValidateSet('up', 'down', 'restart')][string]$Action, [string]$SubDir = '', [string[]]$Services = @()) {
     Assert-DcProjectName $Project
     if ($SubDir -match '(^|/)\.\.(/|$)') { throw "Invalid composeDir '$SubDir'" }
-    $root = Get-DcProjectsRoot
     $svc = (@($Services | Where-Object { $_ } | ForEach-Object { ConvertTo-DcBashLiteral $_ }) -join ' ')
     $cmd = @{ up = "docker compose up -d $svc"; down = 'docker compose down'; restart = "docker compose restart $svc" }[$Action]
-    $path = "$root/$Project" + $(if ($SubDir) { "/$($SubDir.Trim('/'))" } else { '' })
+    $path = (Get-DcProjectDir $Project) + $(if ($SubDir) { "/$($SubDir.Trim('/'))" } else { '' })
     $script = @'
 cd __DIR__ || exit 3
 if [ "__ACTION__" != down ]; then
@@ -441,18 +469,30 @@ function Get-DcCodeFlavor {
     if ($s.codeFlavor -eq 'windows') { 'windows' } else { 'linux' }
 }
 
+# The editor a project opens in by default: its projects.json codeFlavor, else 'windows' for a
+# project on a Windows path (that is where it is used), else the codeFlavor setting.
+function Get-DcProjectFlavor([string]$Project) {
+    $e = (Get-DcProjectConfig)[$Project]
+    if ($e -and $e.PSObject.Properties['codeFlavor'] -and $e.codeFlavor -in @('linux', 'windows')) { return [string]$e.codeFlavor }
+    if (Test-DcWindowsPath (Get-DcProjectPath $Project)) { return 'windows' }
+    Get-DcCodeFlavor
+}
+
 # An empty $Project opens a new window with no folder loaded ("-n"), from $HOME.
 # $Flavor 'linux' / 'windows' picks the editor for this call (the Linux / Windows buttons); empty =
-# the codeFlavor setting. Windows VS Code with no project opens a plain LOCAL window (no WSL needed);
-# with a project it opens the Linux folder through Remote - WSL.
+# the project's default (Get-DcProjectFlavor). Windows VS Code with no project opens a plain LOCAL
+# window (no WSL needed); with a project it opens the Linux folder through Remote - WSL, or a project on
+# a Windows path locally.
 function Open-DcVSCode([string]$Project, [string]$Flavor) {
     $s = Get-DcSettings
     $path = ''
+    $winPath = ''
     if ($Project) {
-        Assert-DcProjectName $Project
-        $path = "$(Get-DcProjectsRoot)/$Project"
+        $path = Get-DcProjectDir $Project
+        $pp = Get-DcProjectPath $Project
+        if (Test-DcWindowsPath $pp) { $winPath = $pp }
     }
-    if ($Flavor -notin @('linux', 'windows')) { $Flavor = Get-DcCodeFlavor }
+    if ($Flavor -notin @('linux', 'windows')) { $Flavor = if ($Project) { Get-DcProjectFlavor $Project } else { Get-DcCodeFlavor } }
     $linux = $Flavor -eq 'linux'
     $label = if ($linux) { 'Linux' } else { 'Windows' }
     if ($linux) {
@@ -463,6 +503,11 @@ function Open-DcVSCode([string]$Project, [string]$Flavor) {
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
         Write-DcCallLog 'CODE' ("linux " + $(if ($path) { $path } else { '-n (no folder)' }))
         $p = Start-DcDetached 'wsl.exe' "-d $($s.distro) -- bash -lc `"echo $b64 | base64 -d | bash`""
+    } elseif ($winPath) {
+        $code = Get-DcCodePath
+        $path = $winPath
+        Write-DcCallLog 'CODE' "windows (local) `"$winPath`""
+        $p = Start-DcDetached 'cmd.exe' "/d /c `"`"$code`" `"$winPath`"`""
     } elseif ($path) {
         $code = Get-DcCodePath
         Write-DcCallLog 'CODE' "windows --remote wsl+$($s.distro) `"$path`""
@@ -592,11 +637,9 @@ printf 'V\t%s\n' "$(echo $roots | wc -w)"
 
 # One-shot tools run to completion in the project folder; background tools are detached.
 function Get-DcToolDir([string]$Project, $Tool) {
-    Assert-DcProjectName $Project
-    $root = Get-DcProjectsRoot
     $cwd = if ($Tool.PSObject.Properties['cwd'] -and $Tool.cwd) { [string]$Tool.cwd } else { '' }
     if ($cwd -match '(^|/)\.\.(/|$)') { throw "Invalid tool cwd '$cwd'" }
-    ConvertTo-DcBashLiteral ("$root/$Project" +$(if ($cwd) { "/$($cwd.Trim('/'))" } else { '' }))
+    ConvertTo-DcBashLiteral ((Get-DcProjectDir $Project) + $(if ($cwd) { "/$($cwd.Trim('/'))" } else { '' }))
 }
 
 function Invoke-DcTool([string]$Project, $Tool) {
@@ -682,7 +725,7 @@ function Stop-DcAllContainers {
 # ---------------------------------------------------------------- project config
 
 # projects.json: { "groups": [...], "collapsed": [...],
-#                 "projects": { "<folder name>": { group, mode, pinned, hidden, url, warning,
+#                 "projects": { "<folder name>": { displayName, description, path, codeFlavor, group, mode, pinned, hidden, url, warning,
 #                                                  compose, composeDir, services, openVSCode, tools[] } } }
 function Get-DcConfigPath {
     if ($env:DEVCONTROL_PROJECTS_JSON) { return $env:DEVCONTROL_PROJECTS_JSON }   # self-test uses a copy

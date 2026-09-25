@@ -78,6 +78,61 @@
       <Setter Property="Padding" Value="8,5"/>
     </Style>
 
+    <!-- Borderless glyph button (Segoe MDL2 Assets): card chevron, more, rename -->
+    <Style x:Key="Icon" TargetType="Button">
+      <Setter Property="Foreground" Value="#9AA0A6"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Width" Value="28"/>
+      <Setter Property="Height" Value="28"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="5">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#3A3E48"/><Setter Property="Foreground" Value="#E6E6E6"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Filter chips (All / Running / Stopped) -->
+    <Style x:Key="Chip" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="#C8CCD2"/>
+      <Setter Property="Margin" Value="0,0,6,0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="b" Background="#282B32" BorderBrush="#3A3E48" BorderThickness="1" CornerRadius="13" Padding="12,4">
+              <ContentPresenter VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#565B66"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#1E3A5F"/><Setter TargetName="b" Property="BorderBrush" Value="#3B82F6"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Field" TargetType="TextBox">
+      <Setter Property="Background" Value="#17181C"/>
+      <Setter Property="Foreground" Value="#E6E6E6"/>
+      <Setter Property="BorderBrush" Value="#434854"/>
+      <Setter Property="CaretBrush" Value="#E6E6E6"/>
+      <Setter Property="Padding" Value="6,4"/>
+    </Style>
+
     <!-- Editor icons (16x16 vector): Linux penguin and Windows logo -->
     <DrawingImage x:Key="IconLinux">
       <DrawingImage.Drawing>
@@ -185,13 +240,7 @@
 
           <Border Style="{StaticResource Card}">
             <StackPanel>
-              <DockPanel Margin="0,0,0,10">
-                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                  <Button x:Name="EditConfigBtn" Style="{StaticResource BtnSmall}" Content="Edit" ToolTip="Open projects.json in Notepad (modes, pins, tools)"/>
-                  <Button x:Name="ReloadConfigBtn" Style="{StaticResource BtnSmall}" Content="Reload" Margin="0"/>
-                </StackPanel>
-                <TextBlock Style="{StaticResource H}" Text="Pinned" Margin="0"/>
-              </DockPanel>
+              <TextBlock Style="{StaticResource H}" Text="Pinned"/>
               <ItemsControl x:Name="PinnedList">
                 <ItemsControl.ItemTemplate>
                   <DataTemplate>
@@ -202,10 +251,10 @@
                           <Button Style="{StaticResource Btn}" Uid="stop" Tag="{Binding Name}" Content="Stop" IsEnabled="{Binding CanAct}" Margin="0"/>
                         </StackPanel>
                         <StackPanel VerticalAlignment="Center">
-                          <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding Folder}"/>
                           <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
                             <Ellipse Width="7" Height="7" Fill="{Binding StatusColor}" Margin="0,0,6,0" VerticalAlignment="Center"/>
-                            <TextBlock Text="{Binding ShortStatus}" Foreground="#9AA0A6" FontSize="11"/>
+                            <TextBlock Text="{Binding ShortStatus}" Foreground="#9AA0A6" FontSize="11" TextTrimming="CharacterEllipsis"/>
                           </StackPanel>
                         </StackPanel>
                       </DockPanel>
@@ -219,22 +268,45 @@
         </StackPanel>
       </ScrollViewer>
 
-      <!-- Right column: projects with their containers and tools -->
+      <!-- Right column: projects. Collapsed card = title + primary action + status; the chevron opens details. -->
       <Border Grid.Column="2" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="8" Padding="12">
         <DockPanel>
           <DockPanel DockPanel.Dock="Top" Margin="2,0,0,10">
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-              <CheckBox x:Name="ShowHiddenBox" Content="Show hidden" Foreground="#9AA0A6" VerticalAlignment="Center" Margin="0,0,12,0"/>
-              <Button x:Name="RefreshBtn" Style="{StaticResource BtnSmall}" Content="Refresh"/>
-              <Button x:Name="StopAllBtn" Style="{StaticResource BtnSmallDanger}" Content="Stop all containers" Margin="0"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+              <Button x:Name="StopAllBtn" Style="{StaticResource BtnSmallDanger}" Content="Stop all containers"
+                      ToolTip="docker stop every running container in WSL"/>
+              <Button x:Name="ManageGroupsBtn" Style="{StaticResource BtnSmall}" Content="Manage groups"
+                      ToolTip="Create, rename, reorder and delete groups; drag projects between them"/>
+              <Button x:Name="RefreshBtn" Style="{StaticResource BtnSmall}" Content="&#xE72C;" FontFamily="Segoe MDL2 Assets" Padding="8,4"
+                      ToolTip="Look for new project folders and refresh container status now"/>
+              <Button x:Name="ProjectsMenuBtn" Style="{StaticResource BtnSmall}" Content="&#xE712;" FontFamily="Segoe MDL2 Assets" Padding="8,4" Margin="0"
+                      ToolTip="projects.json: edit in Notepad, reload"/>
             </StackPanel>
             <StackPanel>
               <TextBlock Style="{StaticResource H}" Text="Projects" Margin="0"/>
               <TextBlock x:Name="ProjectsHint" Style="{StaticResource Hint}" Text=""/>
             </StackPanel>
           </DockPanel>
+
+          <DockPanel DockPanel.Dock="Top" Margin="2,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <ComboBox x:Name="GroupFilter" Width="170" Margin="0,0,10,0" ToolTip="Show one group only"/>
+              <CheckBox x:Name="ShowHiddenBox" Content="Show hidden" Foreground="#9AA0A6" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <RadioButton x:Name="FilterAll" Style="{StaticResource Chip}" GroupName="StatusFilter" Content="All" IsChecked="True"/>
+              <RadioButton x:Name="FilterRunning" Style="{StaticResource Chip}" GroupName="StatusFilter" Content="Running"
+                           ToolTip="Projects with running containers or background tools"/>
+              <RadioButton x:Name="FilterStopped" Style="{StaticResource Chip}" GroupName="StatusFilter" Content="Stopped"/>
+              <Grid Width="190" Margin="6,0,0,0" VerticalAlignment="Center">
+                <TextBox x:Name="SearchBox" Style="{StaticResource Field}"/>
+                <TextBlock x:Name="SearchHint" Text="Search projects" Foreground="#6B7280" Margin="9,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+              </Grid>
+            </StackPanel>
+          </DockPanel>
+
           <ScrollViewer VerticalScrollBarVisibility="Auto">
-            <ItemsControl x:Name="ProjectList" AllowDrop="True">
+            <ItemsControl x:Name="ProjectList">
               <ItemsControl.GroupStyle>
                 <GroupStyle>
                   <GroupStyle.ContainerStyle>
@@ -242,16 +314,15 @@
                       <Setter Property="Template">
                         <Setter.Value>
                           <ControlTemplate TargetType="GroupItem">
-                            <Expander IsExpanded="{Binding Items[0].GroupExpanded, Mode=OneTime}" Tag="{Binding Name}" Margin="0,0,0,8" Foreground="#E6E6E6">
+                            <Expander IsExpanded="{Binding Items[0].GroupExpanded, Mode=OneTime}" Tag="{Binding Name}" Margin="0,0,0,8" Foreground="#E6E6E6"
+                                      ToolTip="Right-click to rename, reorder or delete this group">
                               <Expander.Header>
                                 <StackPanel Orientation="Horizontal">
                                   <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Foreground="#C8CCD2"/>
                                   <TextBlock Text="{Binding ItemCount, StringFormat=' ({0})'}" Foreground="#6B7280"/>
-                                  <Button Style="{StaticResource BtnSmall}" Uid="groupmenu" Tag="{Binding Name}" Content="&#xE712;" FontFamily="Segoe MDL2 Assets"
-                                          FontSize="10" Padding="6,2" Margin="8,0,0,0" ToolTip="Rename, reorder or ungroup this group (drop a project here to move it in)"/>
                                 </StackPanel>
                               </Expander.Header>
-                              <ItemsPresenter Margin="0,8,0,0"/>
+                              <ItemsPresenter Margin="0,6,0,0"/>
                             </Expander>
                           </ControlTemplate>
                         </Setter.Value>
@@ -262,78 +333,175 @@
               </ItemsControl.GroupStyle>
               <ItemsControl.ItemTemplate>
                 <DataTemplate>
-                  <Border Background="{StaticResource Row}" CornerRadius="6" Padding="12,10" Margin="0,0,0,8" Cursor="SizeAll">
+                  <Border CornerRadius="6" Margin="0,0,0,6" BorderThickness="1">
                     <Border.Style>
                       <Style TargetType="Border">
+                        <Setter Property="Background" Value="{StaticResource Row}"/>
+                        <Setter Property="BorderBrush" Value="Transparent"/>
                         <Style.Triggers>
                           <DataTrigger Binding="{Binding IsHiddenRow}" Value="True"><Setter Property="Opacity" Value="0.5"/></DataTrigger>
+                          <DataTrigger Binding="{Binding IsExpanded}" Value="True"><Setter Property="BorderBrush" Value="#3A3E48"/></DataTrigger>
                         </Style.Triggers>
                       </Style>
                     </Border.Style>
                     <StackPanel>
-                      <DockPanel>
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center"
-                                    Visibility="{Binding IsProject, Converter={StaticResource B2V}}">
-                          <Button Style="{StaticResource BtnSmallPrimary}" Uid="run" Tag="{Binding Name}" Content="Run" IsEnabled="{Binding CanRun}"
-                                  Visibility="{Binding ShowRun, Converter={StaticResource B2V}}"
-                                  ToolTip="Start WSL (in the project's mode), compose up, start tools, open VS Code"/>
-                          <Button Style="{StaticResource BtnSmall}" Uid="stop" Tag="{Binding Name}" Content="Stop" IsEnabled="{Binding CanAct}"
-                                  Visibility="{Binding ShowRun, Converter={StaticResource B2V}}" ToolTip="Stop background tools, compose down"/>
-                          <Button Style="{StaticResource BtnSmall}" Uid="restart" Tag="{Binding Name}" Content="Restart" IsEnabled="{Binding CanAct}"
-                                  Visibility="{Binding ShowRun, Converter={StaticResource B2V}}" ToolTip="compose restart, restart background tools"/>
-                          <Button Style="{StaticResource BtnSmall}" Uid="open" Tag="{Binding Name}" Content="Open" ToolTip="{Binding Url}"
-                                  Visibility="{Binding HasUrl, Converter={StaticResource B2V}}"/>
-                          <Button Style="{StaticResource BtnSmall}" Uid="code" Tag="{Binding Name}" IsEnabled="{Binding CanCode}" Padding="7,3"
-                                  ToolTip="Open in Linux VS Code (WSLg); starts WSL first if it is stopped">
-                            <Image Source="{StaticResource IconLinux}" Width="15" Height="15"/>
+                      <!-- header: a click anywhere here (outside buttons) opens / closes the details -->
+                      <DockPanel Uid="hdr" Background="Transparent" Cursor="Hand" Margin="12,6,6,6">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                          <Button Uid="{Binding PrimaryUid}" Tag="{Binding Name}" Content="{Binding PrimaryText}" IsEnabled="{Binding PrimaryEnabled}"
+                                  ToolTip="{Binding PrimaryTip}" Visibility="{Binding ShowPrimary, Converter={StaticResource B2V}}" MinWidth="58">
+                            <Button.Style>
+                              <Style TargetType="Button" BasedOn="{StaticResource BtnSmall}">
+                                <Style.Triggers>
+                                  <DataTrigger Binding="{Binding PrimaryUid}" Value="run">
+                                    <Setter Property="Background" Value="#2563EB"/><Setter Property="BorderBrush" Value="#3B82F6"/><Setter Property="Foreground" Value="White"/>
+                                  </DataTrigger>
+                                </Style.Triggers>
+                              </Style>
+                            </Button.Style>
                           </Button>
-                          <Button Style="{StaticResource BtnSmall}" Uid="codewin" Tag="{Binding Name}" IsEnabled="{Binding CanCode}" Padding="7,3"
-                                  ToolTip="Open in Windows VS Code (Remote - WSL); starts WSL first if it is stopped">
-                            <Image Source="{StaticResource IconWindows}" Width="15" Height="15"/>
+                          <Button Style="{StaticResource BtnSmall}" Uid="codedef" Tag="{Binding Name}" Content="VS Code" IsEnabled="{Binding CanCode}"
+                                  Visibility="{Binding IsProject, Converter={StaticResource B2V}}" ToolTip="{Binding CodeTip}"/>
+                          <Button Style="{StaticResource Icon}" Uid="menu" Tag="{Binding Name}" Content="&#xE712;" Margin="2,0,0,0"
+                                  Visibility="{Binding IsProject, Converter={StaticResource B2V}}" ToolTip="Edit details, group, pin, hide"/>
+                          <Border Background="#1F2127" CornerRadius="11" Padding="9,3" Margin="6,0,2,0" VerticalAlignment="Center" MinWidth="86" ToolTip="{Binding Status}">
+                            <StackPanel Orientation="Horizontal">
+                              <Ellipse Width="8" Height="8" Fill="{Binding StatusColor}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                              <TextBlock Text="{Binding StatusText}" FontSize="12" Foreground="#C8CCD2" MaxWidth="110" TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                          </Border>
+                          <Button Uid="toggle" Tag="{Binding Name}" ToolTip="Show / hide details">
+                            <Button.Style>
+                              <Style TargetType="Button" BasedOn="{StaticResource Icon}">
+                                <Setter Property="Content" Value="&#xE70D;"/>
+                                <Style.Triggers>
+                                  <DataTrigger Binding="{Binding IsExpanded}" Value="True"><Setter Property="Content" Value="&#xE70E;"/></DataTrigger>
+                                </Style.Triggers>
+                              </Style>
+                            </Button.Style>
                           </Button>
-                          <Button Style="{StaticResource BtnSmall}" Uid="menu" Tag="{Binding Name}" Content="&#xE712;" FontFamily="Segoe MDL2 Assets" Margin="0"
-                                  ToolTip="Move, group, pin, hide"/>
                         </StackPanel>
-                        <StackPanel VerticalAlignment="Center">
-                          <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
-                            <Border Background="#1E3A5F" CornerRadius="3" Padding="6,0" Margin="8,1,0,0" VerticalAlignment="Center"
-                                    Visibility="{Binding HasMode, Converter={StaticResource B2V}}" ToolTip="WSL mode this project runs in">
-                              <TextBlock Text="{Binding Mode}" FontSize="11" Foreground="#93C5FD"/>
-                            </Border>
-                          </StackPanel>
-                          <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
-                            <Ellipse Width="7" Height="7" Fill="{Binding StatusColor}" Margin="0,0,6,0" VerticalAlignment="Center"/>
-                            <TextBlock Text="{Binding Status}" Foreground="#9AA0A6" FontSize="12"/>
-                          </StackPanel>
-                          <TextBlock Text="{Binding Info}" Foreground="#6B7280" FontSize="11" Margin="13,1,0,0" TextWrapping="Wrap"
-                                     Visibility="{Binding HasInfo, Converter={StaticResource B2V}}"/>
-                          <TextBlock Text="{Binding Warning}" Foreground="#F59E0B" FontSize="11" Margin="13,2,0,0" TextWrapping="Wrap"
-                                     Visibility="{Binding HasWarning, Converter={StaticResource B2V}}"/>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                          <TextBlock Text="&#xE718;" FontFamily="Segoe MDL2 Assets" FontSize="11" Foreground="#93C5FD" Margin="0,0,7,0" VerticalAlignment="Center"
+                                     Visibility="{Binding IsPinned, Converter={StaticResource B2V}}" ToolTip="Pinned"/>
+                          <TextBlock Text="{Binding Title}" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" ToolTip="{Binding Folder}">
+                            <TextBlock.Style>
+                              <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                  <DataTrigger Binding="{Binding IsEditing}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+                                </Style.Triggers>
+                              </Style>
+                            </TextBlock.Style>
+                          </TextBlock>
+                          <TextBox Uid="titlebox" Tag="{Binding Name}" Text="{Binding Title, Mode=OneWay}" MinWidth="240" FontSize="14"
+                                   Style="{StaticResource Field}" Visibility="{Binding IsEditing, Converter={StaticResource B2V}}"/>
+                          <Button Style="{StaticResource Icon}" Uid="rename" Tag="{Binding Name}" Content="&#xE70F;" Width="24" Height="24" FontSize="11" Margin="4,0,0,0"
+                                  Visibility="{Binding IsProject, Converter={StaticResource B2V}}"
+                                  ToolTip="Rename (changes the name shown here; the folder keeps its name)"/>
+                          <Border Background="#14532D" CornerRadius="3" Padding="6,0" Margin="6,1,0,0" VerticalAlignment="Center"
+                                  Visibility="{Binding IsNew, Converter={StaticResource B2V}}" ToolTip="New folder since you last looked - open it to clear">
+                            <TextBlock Text="New" FontSize="11" Foreground="#86EFAC"/>
+                          </Border>
+                          <Border Background="#1E3A5F" CornerRadius="3" Padding="6,0" Margin="6,1,0,0" VerticalAlignment="Center"
+                                  Visibility="{Binding HasMode, Converter={StaticResource B2V}}" ToolTip="WSL mode this project runs in">
+                            <TextBlock Text="{Binding Mode}" FontSize="11" Foreground="#93C5FD"/>
+                          </Border>
+                          <Border Background="#2E2A45" CornerRadius="3" Padding="6,0" Margin="6,1,0,0" VerticalAlignment="Center"
+                                  Visibility="{Binding HasWorktrees, Converter={StaticResource B2V}}" ToolTip="Git worktrees of this project (see details)">
+                            <TextBlock Text="{Binding WorktreeBadge}" FontSize="11" Foreground="#C4B5FD"/>
+                          </Border>
                         </StackPanel>
                       </DockPanel>
-                      <ItemsControl ItemsSource="{Binding Children}" Margin="0,8,0,0" Visibility="{Binding HasChildren, Converter={StaticResource B2V}}">
-                        <ItemsControl.ItemTemplate>
-                          <DataTemplate>
-                            <Border BorderBrush="#33363E" BorderThickness="0,1,0,0" Padding="0,5,0,4">
-                              <Grid Margin="4,0,0,0">
-                                <Grid.ColumnDefinitions>
-                                  <ColumnDefinition Width="22"/><ColumnDefinition Width="*"/><ColumnDefinition Width="70"/><ColumnDefinition Width="130"/><ColumnDefinition Width="56"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="{Binding Icon}" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="{Binding StatusColor}" VerticalAlignment="Center"/>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                  <TextBlock Text="{Binding Name}" FontSize="12" TextTrimming="CharacterEllipsis"/>
-                                  <TextBlock Text="{Binding Detail}" Foreground="#9AA0A6" FontSize="11" TextTrimming="CharacterEllipsis"/>
-                                </StackPanel>
-                                <TextBlock Grid.Column="2" Text="{Binding Cpu}" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" ToolTip="CPU"/>
-                                <TextBlock Grid.Column="3" Text="{Binding Mem}" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" ToolTip="Memory"/>
-                                <Button Grid.Column="4" Style="{StaticResource BtnSmallDanger}" Uid="child" Tag="{Binding Tag}" Content="Stop" Margin="0"
-                                        HorizontalAlignment="Right" IsEnabled="{Binding CanAct}" Visibility="{Binding HasAction, Converter={StaticResource B2V}}"/>
-                              </Grid>
-                            </Border>
-                          </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                      </ItemsControl>
+
+                      <!-- details -->
+                      <Border BorderBrush="#33363E" BorderThickness="0,1,0,0" Padding="14,10,12,12"
+                              Visibility="{Binding IsExpanded, Converter={StaticResource B2V}}">
+                        <StackPanel>
+                          <TextBlock Text="{Binding Description}" TextWrapping="Wrap" Margin="0,0,0,6"
+                                     Visibility="{Binding HasDescription, Converter={StaticResource B2V}}"/>
+                          <TextBlock Text="{Binding Facts}" Foreground="#9AA0A6" FontSize="12" TextWrapping="Wrap"/>
+                          <TextBlock Text="{Binding Info}" Foreground="#9AA0A6" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"
+                                     Visibility="{Binding HasInfo, Converter={StaticResource B2V}}"/>
+                          <TextBlock Text="{Binding Warning}" Foreground="#F59E0B" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"
+                                     Visibility="{Binding HasWarning, Converter={StaticResource B2V}}"/>
+                          <WrapPanel Margin="0,10,0,0" Visibility="{Binding IsProject, Converter={StaticResource B2V}}">
+                            <Button Style="{StaticResource BtnSmall}" Uid="restart" Tag="{Binding Name}" Content="Restart" IsEnabled="{Binding CanAct}" Margin="0,0,6,6"
+                                    Visibility="{Binding ShowRun, Converter={StaticResource B2V}}" ToolTip="compose restart, restart background tools"/>
+                            <Button Style="{StaticResource BtnSmall}" Uid="open" Tag="{Binding Name}" ToolTip="{Binding Url}" Margin="0,0,6,6"
+                                    Visibility="{Binding HasUrl, Converter={StaticResource B2V}}">
+                              <TextBlock Text="{Binding Url, StringFormat='Open {0}'}" MaxWidth="260" TextTrimming="CharacterEllipsis"/>
+                            </Button>
+                            <Button Style="{StaticResource BtnSmall}" Uid="code" Tag="{Binding Name}" IsEnabled="{Binding CanCode}" Margin="0,0,6,6"
+                                    ToolTip="Open in Linux VS Code (WSLg); starts WSL first if it is stopped">
+                              <StackPanel Orientation="Horizontal">
+                                <Image Source="{StaticResource IconLinux}" Width="14" Height="14" Margin="0,0,6,0"/>
+                                <TextBlock Text="Linux VS Code"/>
+                              </StackPanel>
+                            </Button>
+                            <Button Style="{StaticResource BtnSmall}" Uid="codewin" Tag="{Binding Name}" IsEnabled="{Binding CanCode}" Margin="0,0,6,6"
+                                    ToolTip="Open in Windows VS Code (Remote - WSL); starts WSL first if it is stopped">
+                              <StackPanel Orientation="Horizontal">
+                                <Image Source="{StaticResource IconWindows}" Width="14" Height="14" Margin="0,0,6,0"/>
+                                <TextBlock Text="Windows VS Code"/>
+                              </StackPanel>
+                            </Button>
+                            <Button Style="{StaticResource BtnSmall}" Uid="edit" Tag="{Binding Name}" Content="Edit details..." Margin="0,0,6,6"
+                                    ToolTip="Name, description, group, mode, URL, compose, tools"/>
+                          </WrapPanel>
+
+                          <ItemsControl ItemsSource="{Binding Children}" Margin="0,4,0,0" Visibility="{Binding HasChildren, Converter={StaticResource B2V}}">
+                            <ItemsControl.ItemTemplate>
+                              <DataTemplate>
+                                <Border BorderBrush="#33363E" BorderThickness="0,1,0,0" Padding="0,5,0,4">
+                                  <Grid>
+                                    <Grid.ColumnDefinitions>
+                                      <ColumnDefinition Width="22"/><ColumnDefinition Width="*"/><ColumnDefinition Width="70"/><ColumnDefinition Width="130"/><ColumnDefinition Width="56"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{Binding Icon}" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="{Binding StatusColor}" VerticalAlignment="Center"/>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                      <TextBlock Text="{Binding Name}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                                      <TextBlock Text="{Binding Detail}" Foreground="#9AA0A6" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{Binding Cpu}" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" ToolTip="CPU"/>
+                                    <TextBlock Grid.Column="3" Text="{Binding Mem}" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" ToolTip="Memory"/>
+                                    <Button Grid.Column="4" Style="{StaticResource BtnSmallDanger}" Uid="child" Tag="{Binding Tag}" Content="Stop" Margin="0"
+                                            HorizontalAlignment="Right" IsEnabled="{Binding CanAct}" Visibility="{Binding HasAction, Converter={StaticResource B2V}}"/>
+                                  </Grid>
+                                </Border>
+                              </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                          </ItemsControl>
+
+                          <StackPanel Margin="0,8,0,0" Visibility="{Binding HasWorktrees, Converter={StaticResource B2V}}">
+                            <TextBlock Text="Git worktrees (extra checkouts of this repo on other branches, as sibling folders)" Foreground="#C4B5FD" FontSize="12" Margin="0,0,0,4"/>
+                            <ItemsControl ItemsSource="{Binding Worktrees}">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                  <Border BorderBrush="#33363E" BorderThickness="0,1,0,0" Padding="0,5,0,4">
+                                    <DockPanel>
+                                      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Button Style="{StaticResource BtnSmall}" Uid="code" Tag="{Binding Name}" IsEnabled="{Binding CanCode}" Padding="7,3"
+                                                ToolTip="Open this worktree in Linux VS Code">
+                                          <Image Source="{StaticResource IconLinux}" Width="14" Height="14"/>
+                                        </Button>
+                                        <Button Style="{StaticResource BtnSmall}" Uid="codewin" Tag="{Binding Name}" IsEnabled="{Binding CanCode}" Padding="7,3" Margin="0"
+                                                ToolTip="Open this worktree in Windows VS Code">
+                                          <Image Source="{StaticResource IconWindows}" Width="14" Height="14"/>
+                                        </Button>
+                                      </StackPanel>
+                                      <Ellipse DockPanel.Dock="Left" Width="7" Height="7" Fill="{Binding StatusColor}" Margin="4,0,9,0" VerticalAlignment="Center"/>
+                                      <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Name}" FontSize="12"/>
+                                        <TextBlock Text="{Binding Info}" Foreground="#9AA0A6" FontSize="11" TextWrapping="Wrap"/>
+                                      </StackPanel>
+                                    </DockPanel>
+                                  </Border>
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                          </StackPanel>
+                        </StackPanel>
+                      </Border>
                     </StackPanel>
                   </Border>
                 </DataTemplate>

@@ -55,6 +55,9 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
 - Project discovery is folder-driven: EVERY directory under `projectsRoot` is listed, whether or not it
   has a compose file. `projects.json` only adds metadata; a folder with no entry lands in group `New`
   (rank -1, above everything). Hide noise with the card menu's Hide, not by deleting entries.
+  Exception: an entry with `path` is listed from that folder (Linux path, or Windows path via `/mnt/<drive>`);
+  every folder path goes through `Get-DcProjectDir`, never `"$root/$Project"`. A Windows-path project opens
+  in Windows VS Code locally by default (`Get-DcProjectFlavor`).
 - Compose safety: worktrees and folders sharing a compose `name:` with another folder get no compose
   unless `"compose": true` (`Get-ComposePolicy`); `Invoke-DcCompose` refuses `up`/`restart` when the
   compose name already has containers from another folder.
