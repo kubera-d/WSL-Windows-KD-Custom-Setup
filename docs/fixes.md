@@ -40,3 +40,13 @@ fixes are in [`devcontrol/docs/fixes.md`](../devcontrol/docs/fixes.md).)
   supports the wlroots data-control protocol"); polling - steals focus.
 - **Fix:** WSLg Helper converts to PNG and `wl-copy`s it when focus enters a Linux window, and restores the
   bitmap for Windows apps when focus leaves.
+
+### FIX-009 - Clicks ignored / pointer stays an arrow over some buttons after screens change
+- **Symptom:** after sleep or unplugging/turning off monitors, some buttons in Linux VS Code (e.g. the
+  Claude panel's choice buttons) don't react and the pointer doesn't turn into a hand over them; others work.
+- **Cause:** WSLg got the change as a LIVE `DisplayLayoutChange` inside the existing RDP connection. The
+  layout then matched Windows, so FIX-006's mismatch check did nothing, but the Linux windows' input
+  state was left stale.
+- **Fix:** the WSLg Helper also restarts `msrdc.exe` once after a live `DisplayLayoutChange` (once the Windows
+  layout has been stable for 10 s; a fresh connection clears the flag, so no loop). Manual fix:
+  `Stop-Process -Name msrdc -Force` (Linux apps keep running).

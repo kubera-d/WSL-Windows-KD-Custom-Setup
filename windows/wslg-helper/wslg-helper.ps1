@@ -6,6 +6,10 @@
 #    to the wrong size. When the layout WSLg last received (weston.log) differs from the real Windows
 #    layout for a few seconds, restart msrdc.exe. WSLGd relaunches it within ~1s with the current
 #    layout; Linux apps keep running.
+#    Also after a LIVE layout change (screens added/removed while connected: weston.log
+#    "DisplayLayoutChange", not a fresh connection): the layouts then match, but Linux windows can
+#    stop taking clicks and the pointer shape stops updating over parts of them. One msrdc restart
+#    once the layout has settled rebuilds the windows.
 # 2. Clipboard images. WSLg hands Windows images to Linux only as image/bmp, which Chromium/Electron
 #    apps (Linux VS Code and its Claude panel, browsers) cannot paste. When you switch INTO a Linux
 #    window with a new Windows image on the clipboard, the image is handed to Linux as image/png.
@@ -93,6 +97,7 @@ function Get-MsrdcPids {
 $script:logPos = 0
 $script:wslgLayout = $null
 $script:group = @()
+$script:liveChange = $false   # a DisplayLayoutChange arrived since the last (re)connect
 $monRe = 'rdpMonitor\[(\d+)\]: x:(-?\d+), y:(-?\d+), width:(\d+), height:(\d+)'
 
 function Update-WslgLayout {
@@ -106,6 +111,8 @@ function Update-WslgLayout {
         if ($cut -lt 0) { return }
         $script:logPos += [Text.Encoding]::UTF8.GetByteCount($text.Substring(0, $cut + 1))
         foreach ($line in $text.Substring(0, $cut).Split("`n")) {
+            if ($line.Contains('Client: DisplayLayoutChange')) { $script:liveChange = $true }
+            elseif ($line.Contains('xf_peer_adjust_monitor_layout')) { $script:liveChange = $false }   # fresh connection
             if ($line -match $monRe) {
                 if ($Matches[1] -eq '0') { $script:group = @() }
                 $script:group += '{0},{1},{2},{3}' -f $Matches[2], $Matches[3], $Matches[4], $Matches[5]
@@ -124,6 +131,13 @@ function Invoke-MonitorSync {
     if (((Get-Date) - $mon.winSince).TotalSeconds -lt $StableSec) { return }
 
     Update-WslgLayout
+    if ($script:wslgLayout -and $script:wslgLayout -eq $win -and $script:liveChange) {
+        if (((Get-Date) - $mon.lastRestart).TotalSeconds -lt $CooldownSec) { return }
+        Write-Log "monitors: live layout change to [$win] -> restarting msrdc to rebuild Linux windows"
+        Get-Process msrdc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        $mon.lastRestart = Get-Date; $script:liveChange = $false
+        return
+    }
     if (-not $script:wslgLayout -or $script:wslgLayout -eq $win) { $mon.tries = 0; $mon.triesKey = $null; return }
 
     $key = "$win => $($script:wslgLayout)"

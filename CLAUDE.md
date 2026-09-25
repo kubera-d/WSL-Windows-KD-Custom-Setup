@@ -53,6 +53,8 @@ Dev Control has its own developer guide: `devcontrol/CLAUDE.md`.
   `powershell -STA`). Log: `wslg-helper.log` next to it. `-Status` prints both monitor layouts.
 - Monitor sync: parses `\\wsl.localhost\<distro>\mnt\wslg\weston.log` incrementally (`rdpMonitor[n]` blocks,
   group starts at index 0), compares with `EnumDisplayMonitors` (per-monitor DPI aware), restarts `msrdc.exe`.
+  Also restarts it once after a live `Client: DisplayLayoutChange` even when the layouts match (FIX-009);
+  `xf_peer_adjust_monitor_layout` marks a fresh connection and clears that flag.
 - Clipboard: `GetClipboardSequenceNumber` + clipboard owner PID (msrdc = came from Linux) + foreground PID.
   Focus enters Linux with a pending Windows image -> PNG -> `wl-copy --type image/png`; focus leaves with the
   clipboard unchanged since -> `Clipboard.SetImage` restores it.
