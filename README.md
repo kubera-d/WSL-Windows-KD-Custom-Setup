@@ -37,9 +37,9 @@ The installer asks before each part (all per-user, no admin; the Linux packages 
 
 | Step | What you get |
 |---|---|
-| 1. Linux side | Linux VS Code (if missing), clipboard/voice/font packages, `code-linux` launchers in `~/.local/bin` |
+| 1. Linux side | Linux VS Code (if missing), clipboard/voice/font packages, `code-linux` launchers in `~/.local/bin`, Linux system log kept across restarts |
 | 2. Launchers | Start Menu **VS Code (Linux)** and **VS Code (Windows)**, right-click **Open in VS Code (Linux)**, optional desktop shortcut |
-| 3. WSLg Helper | background task: monitor-layout resync after sleep + screenshot paste |
+| 3. WSLg Helper | background task while WSL runs (started by Dev Control): monitor-layout resync after sleep + screenshot paste |
 | 4. Drag-to-snap | `%USERPROFILE%\.wslgconfig` setting (applies after `wsl --shutdown`) |
 | 5. Dev Control | optional app; can sign its launcher with a local certificate so SmartScreen stays quiet |
 

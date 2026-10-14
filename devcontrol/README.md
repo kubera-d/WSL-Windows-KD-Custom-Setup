@@ -17,42 +17,72 @@ so it keeps working after `wsl --shutdown`, and it never wakes WSL up by acciden
   Or set `"codeFlavor": "windows"` to use Windows VS Code with `--remote wsl+<distro>`.
 
 ## Features
-- **Status**: WSL running/stopped, VmmemWSL memory, current mode (the mode file whose content
-  matches `.wslconfig`), and the live CPU/RAM the VM actually has.
-- **Start WSL** in a mode: copies `modes\<mode>.wslconfig` to `%USERPROFILE%\.wslconfig`, then boots.
-  If WSL is running in another mode it asks before restarting. With no mode picked it just boots on
-  the current `.wslconfig`. A `.wslconfig` that matches no mode is backed up before it is replaced.
-- **Stop WSL**: asks, then runs `wsl --shutdown` (frees the VM's memory and CPU).
-- **VS Code** card: **Linux VS Code** (penguin) opens an empty Linux VS Code window, booting WSL first if needed;
-  **Windows VS Code** (Windows logo) opens an empty local Windows VS Code window (no WSL needed);
-  **Quit Linux VS Code** closes every VS Code window inside WSL (SIGTERM, SIGKILL after 20 s).
-- **Projects**: every folder under `projectsRoot` (a Linux path) is listed and grouped;
-  `projects.json` only adds metadata. Each card shows its compose containers **and** background
-  tools nested underneath, with CPU/RAM and a Stop button.
-  - A folder with no `projects.json` entry appears in a **New** group at the top, so a project you
-    just created is noticed on the next refresh (30 s).
+One window: a header bar (WSL and VS Code), a search bar, tabs, and the project list.
+
+- **Header**: one status pill (WSL running/stopped, VmmemWSL memory, current mode - the mode file
+  whose content matches `.wslconfig`; hover it for the live CPU/RAM the VM actually has), the mode
+  picker, and only the WSL button that applies right now:
+  - **Start WSL** (while stopped): copies `modes\<mode>.wslconfig` to `%USERPROFILE%\.wslconfig`, then
+    boots. With no mode picked it just boots on the current `.wslconfig`. A `.wslconfig` that matches no
+    mode is backed up before it is replaced.
+  - **Switch to** *mode* (running, another mode picked): asks, then restarts WSL in that mode.
+  - **Stop WSL** (while running): asks, then runs `wsl --shutdown` (frees the VM's memory and CPU). If WSL
+    is still up, or boots straight back up, it retries with `wsl --shutdown --force`, then offers a force
+    stop with admin rights (`hcsdiag kill` on the WSL VM). Task Manager cannot end `vmmemWSL`. See
+    FIX-010 in the repo's `docs/fixes.md`.
+  - **VS Code**: penguin = new empty Linux VS Code window (boots WSL first if needed); Windows logo = new
+    empty local Windows VS Code window (no WSL needed); **Quit (n)** (only while Linux VS Code runs)
+    closes every VS Code window inside WSL (SIGTERM, SIGKILL after 20 s).
+  - **...**: Refresh now, Stop all containers, Edit / Reload `projects.json`, Clear all New badges,
+    Show / hide the activity log (the last log line is always shown at the bottom; click it to open).
+- **Search** (`Ctrl+F` or `/` from anywhere): filters the current tab by name, folder, path, group,
+  mode, description or worktree as you type (every word must match). Titles that start with the text
+  come first, and the best match is highlighted: **Up / Down** move the highlight, **Enter** opens it in
+  VS Code, **Ctrl+Enter** runs or stops it, **Esc** clears.
+- **Tabs**: All, Running, one per group (in `groups` order, empty groups included), Ungrouped and
+  Hidden (when they have anything), **+ New group**. Each shows its count.
+- **Projects**: every folder under `projectsRoot` (a Linux path) is listed; `projects.json` only adds
+  metadata. Pinned projects come first, then the most recently used (or A-Z: the sort button right of
+  the tabs). "Recently used" is the later of the last Run / VS Code / Open from Dev Control and the
+  folder's own last activity (last git commit, else newest file). Each row shows status, group and age;
+  click it for details: compose containers **and** background tools nested underneath, with CPU/RAM
+  and a Stop button.
+  - A folder with no `projects.json` entry has no group and a **New** badge until you open it, so a
+    project you just created is noticed on the next refresh (30 s).
   - **Run**: start WSL in the project's `mode` (asks: restart in that mode / run in the current mode /
     cancel) > `docker compose up -d` (optionally only some `services`) > run its `tools` > open VS Code.
   - **Stop**: stop background tools and tool `stop` commands > `docker compose down`.
-    **Restart**: compose restart + restart background tools.
-  - **Open** (the project's `url`), and two editor buttons: penguin = open the folder in Linux VS Code,
-    Windows logo = open it in Windows VS Code via Remote - WSL (both start WSL first if needed).
-  - **Pinned** projects get big Run/Stop buttons on the left and in the tray menu.
-- **Stop all containers**, plus an "Other containers" group for containers of no listed project.
-- **Tray icon**: Open, Run project (pinned), Start WSL (per mode), Stop WSL, Open Linux VS Code,
-  Open Windows VS Code, Quit Linux VS Code, Exit. Minimizing hides to the tray.
+    **Restart** (details): compose restart + restart background tools.
+  - **Code** opens the folder in the project's editor (`codeFlavor`). The details also have **Open**
+    (the project's `url`) and both editors explicitly (Linux VS Code / Windows VS Code via Remote - WSL;
+    both start WSL first if needed).
+  - Containers and tools of no listed project appear in an "Other containers and tools" row (All and
+    Running tabs).
+- **Tray icon**: Open, Run project (pinned projects, then the most recently used - 8 at most), Start WSL
+  (per mode), Stop WSL, Open Linux VS Code, Open Windows VS Code, Quit Linux VS Code, Exit. Minimizing
+  hides to the tray.
 
-### Arranging projects (saved, restored every time)
-- **Drag** a card onto another card to reorder (top/bottom half = before/after), or onto a
-  **group header** to move it into that group.
-- Card **...** menu (or right-click): Move up / down, Move to group (or **New group...**),
-  Remove from group, Pin/Unpin, Hide/Unhide. Group header menu: Rename, Move up / down, Ungroup.
-- **Show hidden** reveals hidden projects (dimmed) so they can be unhidden.
-- Changes are written to `projects.json` (`order`, `group`, `groups`, `pinned`, `hidden`). The file
-  is re-read before every change, so edits made in a text editor are kept; the previous version is
-  saved as `%LOCALAPPDATA%\DevControl\projects.json.bak`.
-- Expanded groups and the Show-hidden toggle are per-user view state in
-  `%LOCALAPPDATA%\DevControl\ui-state.json`.
+### Groups (saved, restored every time)
+A project is in at most one group. Three ways to put projects in a group:
+- **Click the group label** on a row (under the title; "No group" when it has none): pick a group, No
+  group, or **New group...**. The card's **...** menu has the same list under **Group**.
+- **Drag** a row onto a tab: a group tab moves it there, **Ungrouped** takes it out of its group,
+  **Hidden** hides it, **+ New group** asks for a name and puts it in the new group.
+- **Add projects** (shown on a group's tab, also when the group is empty): a checklist of every project,
+  with a filter box. Ticked = in the group; ticking a project from another group moves it here, unticking
+  makes it ungrouped. Save applies everything at once.
+
+**+ New group** asks for a name, opens the new tab and the checklist. A group tab's right-click menu
+(or the **...** next to Add projects): Add or remove projects, Rename, Move left / right, Delete (its
+projects become ungrouped; nothing else changes). Card menu: Edit details, Rename, Group, Pin to top /
+Unpin, Hide / Unhide, open in either editor, Copy folder path.
+
+- Changes are written to `projects.json` (`group`, `groups`, `pinned`, `hidden`). The file is re-read
+  before every change, so edits made in a text editor are kept; the previous version is saved as
+  `%LOCALAPPDATA%\DevControl\projects.json.bak`. `order` and `collapsed` from older versions are no
+  longer used (moving a project drops its `order`).
+- The open tab, sort order, log open/closed and when each project was last used are per-user view
+  state in `%LOCALAPPDATA%\DevControl\ui-state.json`.
 
 ## Install
 From the repo's top-level installer (which calls Deploy.ps1), or directly:
@@ -129,10 +159,10 @@ outside `projectsRoot`, e.g. on the Windows drive). Example (see `src\projects.e
 | `displayName`, `description` | Title shown on the card (default: the key) and a short description. |
 | `path` | Folder of a project outside `projectsRoot`: a Linux path, or a Windows path (`C:\\...`, reached from Linux through `/mnt/c`). A project on a Windows path opens in Windows VS Code locally (no Remote - WSL) unless `codeFlavor` says otherwise. |
 | `codeFlavor` | `linux` / `windows`: the editor this project opens in, overriding the `codeFlavor` setting. |
-| `group`, `order` | Section in the list and position in it (written by drag and drop). |
+| `group` | Group (tab) the project is in. Written by the group label, drag and drop and Add projects. |
 | `mode` | Mode Run starts WSL in. Omit to use whatever mode WSL is in. |
-| `pinned` | Pinned panel + tray "Run project" menu. |
-| `hidden` | Not listed (unless Show hidden). |
+| `pinned` | Top of the list + tray "Run project" menu. |
+| `hidden` | Only listed in the Hidden tab. |
 | `url` | Shows an Open button. |
 | `warning` | Text shown on the card. |
 | `compose` | `false` = never run compose here; `true` = allow it even for a worktree / shared compose name. |
@@ -141,8 +171,8 @@ outside `projectsRoot`, e.g. on the Windows drive). Example (see `src\projects.e
 | `openVSCode` | Default `true`: Run ends by opening VS Code on the folder. |
 | `tools[]` | `name`, `command`, `cwd`, `background`, `stop`, `timeoutSeconds`. One-shot tools must succeed; background tools run detached (`setsid nohup`) with pid files and logs in `~/.cache/devcontrol/run/<project>/` (pid + boot id, so a stale pid after a WSL restart is never killed by mistake). |
 
-Top level: `groups` (order), `collapsed` (folded by default), `_help` (documentation, kept on save).
-Click **Reload** after editing.
+Top level: `groups` (tab order; empty groups are kept), `_help` (documentation, kept on save).
+Use **... > Reload projects.json** after editing.
 
 ## Safety rules
 - **Never boots WSL by accident.** Every `wsl.exe` call that runs something inside Linux goes through
@@ -173,6 +203,7 @@ Remove the certificate with `Uninstall-DevControl.ps1 -RemoveCertificate`.
 | `src/DevControl.ps1` | UI, async job runner, tray, project Run/Stop/Restart sequences, grouping |
 | `src/Core.ps1` | all WSL/Docker/Windows logic (also loaded in background runspaces) |
 | `src/MainWindow.xaml` | window layout and styles |
+| `src/EditProject.xaml`, `src/GroupMembers.xaml` | Edit details dialog; Add projects (projects-in-group checklist) |
 | `src/SelfTest.ps1` | automated UI test (`-SelfTest`) |
 | `src/Install.ps1` | build step: icon, compiles + signs `DevControl.exe` |
 | `src/Launcher.cs` | no-console launcher source |
@@ -195,21 +226,23 @@ brings a test compose project up and down, and opens a fixture folder and an emp
 
 **Manual checklist** (the parts the self-test must not do for real). Close WSL terminals and VS Code
 windows you care about first.
-1. **Stop WSL** > confirm > the log says `WSL shut down.`, the header shows **WSL: Stopped**, Memory `-`,
-   project buttons grey out. The window stays open.
-2. Wait 60 s. The header still says **WSL: Stopped** (the app must not wake it). `wsl --list --running`
+1. **Stop WSL** > confirm > the log says `WSL shut down.`, the header shows **WSL stopped** with no memory,
+   only **Start WSL** is left, project Stop buttons disappear. The window stays open.
+2. Wait 60 s. The header still says **WSL stopped** (the app must not wake it). `wsl --list --running`
    says no running distributions; `wsl-calls.log` shows only `QUERY` lines since the `SHUT` line.
-3. Pick **coding** > **Start WSL** > log: `Mode set to coding. ... is running. Docker is ready.` The header
-   shows `Mode: coding (16GB / 8 CPU)` and Live about 8 CPU.
-4. Pick **balanced** > **Start WSL** > a restart prompt appears. **No** changes nothing; **Yes** restarts
-   WSL and Live shows 6 CPU.
+3. Pick **coding** > **Start WSL** > log: `Mode set to coding. ... is running. Docker is ready.` The pill
+   shows `coding`; its tooltip says about 8 CPU.
+4. Pick **balanced** > **Switch to balanced** > a restart prompt appears. **No** changes nothing; **Yes**
+   restarts WSL and the pill tooltip says 6 CPU.
 5. Tray: **Stop WSL** > confirm > stopped; **Start WSL > balanced mode** > running.
 6. With WSL stopped, **Run** a pinned project that has a `mode` > WSL starts in that mode, compose comes
    up, VS Code opens; its containers appear nested under the card.
-7. **Quit VS Code** > confirm > every VS Code window in WSL closes, the card says *Not running in WSL*,
-   WSL and containers keep running. **Open (no folder)** brings back an empty window.
-8. `mkdir <projectsRoot>/zz-test` in a WSL terminal > within 30 s **zz-test** appears under **New**.
-   `rmdir` it > it disappears.
+7. **Quit (n)** > confirm > every VS Code window in WSL closes and the Quit button disappears; WSL and
+   containers keep running. The penguin button brings back an empty window.
+8. `mkdir <projectsRoot>/zz-test` in a WSL terminal > within 30 s **zz-test** appears at the top with a
+   **New** badge (Ungrouped tab). `rmdir` it > it disappears.
+9. Drag a row onto a group tab (the tab gets a blue outline) > it moves there. **+ New group** > name >
+   the new tab and the checklist open; tick two projects > Save > both are in the group.
 
 ## Uninstall
 ```powershell

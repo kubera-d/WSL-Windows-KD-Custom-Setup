@@ -2,10 +2,10 @@
   "_help": [
     "Per-project settings. Key = folder name under projectsRoot (settings.json).",
     "EVERY folder there is listed automatically - this file only adds metadata to them.",
-    "A folder with no entry here appears in the group 'New' (top of the list) until you group or hide it.",
-    "  group       section in the list; 'groups' below sets the order, 'collapsed' the ones folded by default.",
+    "A folder with no entry here has no group (Ungrouped tab) and a New badge until you open it.",
+    "  group       the group (tab) it is in; 'groups' below sets the tab order and keeps empty groups.",
     "  mode        WSL mode for Run (a file name in the modes folder: balanced / coding / lightroom). Omit to use whatever mode WSL is in.",
-    "  pinned      true = Pinned panel + tray 'Run project' menu.     hidden  true = not listed at all.",
+    "  pinned      true = top of the list + tray 'Run project' menu.  hidden  true = only in the Hidden tab.",
     "  url         shows an Open button (browser).                  warning  text shown on the card.",
     "  compose     false = never run docker compose here. true = allow it even for a worktree / shared compose name.",
     "  composeDir  subfolder holding the compose file.              services  only start these compose services.",
@@ -17,7 +17,7 @@
     "              Background tools stop on Stop / Stop WSL; logs in ~/.cache/devcontrol/run/<project>/.",
     "Git worktrees are detected automatically, grouped under their repo, and never compose'd.",
     "The projects below are examples - rename them to your own folder names, or delete them.",
-    "Click Reload in the app after editing."
+    "In the app: ... > Reload projects.json after editing."
   ],
   "groups": ["Active", "Tools", "Archive"],
   "collapsed": ["Archive"],

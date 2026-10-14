@@ -42,7 +42,7 @@
           <StackPanel Grid.Column="0">
             <TextBlock Style="{StaticResource Label}" Text="Group"/>
             <ComboBox x:Name="GroupBox" IsEditable="True"/>
-            <TextBlock Style="{StaticResource Sub}" Text="Pick one or type a new name. Empty = Ungrouped."/>
+            <TextBlock Style="{StaticResource Sub}" Text="Pick one or type a new name. Empty = no group."/>
           </StackPanel>
           <StackPanel Grid.Column="2">
             <TextBlock Style="{StaticResource Label}" Text="WSL mode for Run"/>
@@ -60,7 +60,7 @@
         <TextBlock Style="{StaticResource Sub}" Text="Shown in amber in the details, e.g. 'port 8080 is also used by X'."/>
 
         <WrapPanel Margin="0,6,0,0">
-          <CheckBox x:Name="PinnedBox" Content="Pinned (left panel and tray menu)"/>
+          <CheckBox x:Name="PinnedBox" Content="Pinned (top of the list and tray menu)"/>
           <CheckBox x:Name="OpenCodeBox" Content="Run also opens VS Code"/>
           <CheckBox x:Name="HiddenBox" Content="Hidden"/>
         </WrapPanel>

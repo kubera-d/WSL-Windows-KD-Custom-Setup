@@ -33,32 +33,35 @@ namespace DevControl {
     public bool CanCode {get;set;} public bool Running {get;set;}
   }
   // Name = folder (the key everywhere); Title = what the card shows (projects.json displayName, else Name).
-  // IsExpanded / IsEditing / IsNew notify, so opening a card or renaming it does not rebuild the list.
+  // IsExpanded / IsEditing / IsNew / IsActive notify, so opening a card, renaming it or moving the
+  // keyboard highlight does not rebuild the list.
   public class ProjectRow : INotifyPropertyChanged {
     public event PropertyChangedEventHandler PropertyChanged;
     void Raise(string p) { PropertyChangedEventHandler h = PropertyChanged; if (h != null) h(this, new PropertyChangedEventArgs(p)); }
-    bool _expanded, _editing, _new;
+    bool _expanded, _editing, _new, _active;
     public bool IsExpanded { get { return _expanded; } set { if (_expanded != value) { _expanded = value; Raise("IsExpanded"); } } }
     public bool IsEditing { get { return _editing; } set { if (_editing != value) { _editing = value; Raise("IsEditing"); } } }
     public bool IsNew { get { return _new; } set { if (_new != value) { _new = value; Raise("IsNew"); } } }
+    public bool IsActive { get { return _active; } set { if (_active != value) { _active = value; Raise("IsActive"); } } }
     public string Name {get;set;} public string Title {get;set;} public string Folder {get;set;}
     public string Status {get;set;} public string ShortStatus {get;set;} public string StatusText {get;set;} public string StatusColor {get;set;}
+    public string StatusLine {get;set;} public long Recent {get;set;}
     public bool IsRunning {get;set;}
     public string Mode {get;set;} public bool HasMode {get;set;} public bool IsProject {get;set;} public bool IsPinned {get;set;}
-    public bool CanRun {get;set;} public bool CanAct {get;set;} public bool CanCode {get;set;} public string CodeTip {get;set;}
+    public bool CanRun {get;set;} public bool CanAct {get;set;} public bool CanCode {get;set;} public string CodeTip {get;set;} public bool CodeIsWindows {get;set;}
     public string PrimaryUid {get;set;} public string PrimaryText {get;set;} public string PrimaryTip {get;set;}
     public bool ShowPrimary {get;set;} public bool PrimaryEnabled {get;set;}
     public List<ChildRow> Children {get;set;} public bool HasChildren {get;set;}
     public List<WorktreeRow> Worktrees {get;set;} public bool HasWorktrees {get;set;} public string WorktreeBadge {get;set;}
-    public string Group {get;set;} public bool GroupExpanded {get;set;} public bool ShowRun {get;set;}
+    public string Group {get;set;} public string GroupLabel {get;set;} public bool HasGroup {get;set;} public bool ShowRun {get;set;}
     public string Facts {get;set;} public string Description {get;set;} public bool HasDescription {get;set;}
     public string Info {get;set;} public bool HasInfo {get;set;} public string Warning {get;set;} public bool HasWarning {get;set;}
     public string Url {get;set;} public bool HasUrl {get;set;} public bool IsHiddenRow {get;set;}
   }
-  public class BoardItem { public string Name {get;set;} public string Title {get;set;} }
-  public class BoardColumn {
-    public string Name {get;set;} public string Hint {get;set;} public bool CanEdit {get;set;}
-    public List<BoardItem> Items {get;set;}
+  // One line of the "Projects in group" checklist.
+  public class PickItem {
+    public string Name {get;set;} public string Title {get;set;} public string Sub {get;set;}
+    public bool IsChecked {get;set;} public bool WasChecked {get;set;}
   }
   public static class Native {
     [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
@@ -84,11 +87,12 @@ $iconPath = Join-Path $AppDir 'DevControl.ico'
 $pngPath  = Join-Path $AppDir 'DevControl.png'
 if (Test-Path $iconPath) { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]$iconPath) }
 if (Test-Path $pngPath)  { $ui.AppIcon.Source = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]$pngPath) }
-$ui.ModePill.ToolTip = "Mode in $($settings.wslConfigPath) (applies at next WSL start)"
+$ui.ModeText.ToolTip = "Mode in $($settings.wslConfigPath) (applies at next WSL start)"
 $win.add_SourceInitialized({ try { [DevControl.Native]::DarkTitleBar((New-Object Windows.Interop.WindowInteropHelper $win).Handle) } catch { } })
 
 $IconContainer = [string][char]0xE7B8   # Segoe MDL2 "package"
 $IconTool      = [string][char]0xE90F   # Segoe MDL2 "repair"
+$script:Sep    = "  $([char]0x00B7)  "     # middle dot between the parts of a card's status line (kept out of the ASCII-only source)
 
 # ---------------------------------------------------------------- state
 
@@ -102,11 +106,15 @@ $script:Tools = @()                 # background tool pid files (running or exit
 $script:VSCodeCount = 0             # Linux VS Code instances running in WSL (from Get-DcRuntime)
 $script:ProjectCfg = @{}            # projects.json "projects"
 $script:ConfigMeta = $null          # projects.json top level (groups, collapsed)
-$script:GroupExpanded = @{}         # group name -> expanded (what the user last chose; saved in ui-state.json)
-$script:ShowHidden = $false         # "Show hidden" toggle (saved in ui-state.json)
-$script:StatusFilter = 'all'        # all | running | stopped (saved in ui-state.json)
-$script:GroupFilter = ''            # '' = every group (saved in ui-state.json)
+$script:View = 'all'                # tab: all | running | ungrouped | hidden | g:<group> (saved in ui-state.json)
+$script:Sort = 'recent'             # recent | name (saved in ui-state.json)
+$script:Used = @{}                  # project name -> unix time last run / opened from Dev Control (ui-state.json)
+$script:LogOpen = $false            # activity log expanded (ui-state.json)
 $script:Search = ''
+$script:ActiveName = $null          # keyboard-highlighted row (search box Up / Down / Enter)
+$script:ConfigError = ''            # projects.json could not be read
+$script:TabsKey = ''                # what the tab strip was last built from (rebuilt only when it changes)
+$script:TrayKey = ''
 $script:Seen = $null                # folder names already shown once; $null until the first live listing (ui-state.json)
 $script:CardExpanded = @{}          # project name -> details open (this session only)
 $script:EditingName = $null         # project whose title is being renamed in place (list rebuilds wait)
@@ -114,7 +122,7 @@ $script:AllRows = @()               # every top-level row, hidden ones included,
 $script:LastRows = @()              # rows as last rendered (after filters)
 $script:Dragging = $false
 $script:SyncingFilters = $false     # set while the UI updates filter controls itself (ignore their events)
-$script:Ungrouped = 'Ungrouped'     # pseudo group of projects with no "group" (top of the list)
+$script:Ungrouped = 'Ungrouped'     # pseudo group of projects with no "group"
 $script:OtherGroup = 'Other containers'
 $script:PromptHook = $null          # self-test replaces the text prompt
 $script:UiStatePath = Join-Path $DcDataDir 'ui-state.json'
@@ -126,7 +134,7 @@ $script:Exiting = $false
 $script:Jobs = New-Object System.Collections.ArrayList
 $script:Tray = $null
 $script:TrayItems = @{}
-$script:BoardWin = $null            # Manage groups window while it is open
+$script:DialogWin = $null           # Projects-in-group window while it is open (owner of its message boxes)
 $script:EditDlg = $null             # Edit details dialog state while it is open
 $script:TestLog = New-Object System.Collections.ArrayList
 
@@ -138,6 +146,7 @@ function Log([string]$Message) {
     if ($ui.LogBox.Text.Length -gt 60000) { $ui.LogBox.Text = $ui.LogBox.Text.Substring(30000) }
     $ui.LogBox.AppendText($line + "`r`n")
     $ui.LogBox.ScrollToEnd()
+    $ui.LastLogText.Text = $line
     Write-DcLog $Message
     [void]$script:TestLog.Add($line)
 }
@@ -159,7 +168,7 @@ function Ask-Dc3([string]$Message, [string]$Title) {
 
 function Show-DcMessage([string]$Message, [string]$Title, [string]$Buttons) {
     $default = if ($Buttons -eq 'YesNo') { 'No' } else { 'Cancel' }
-    if ($script:BoardWin) { [Windows.MessageBox]::Show($script:BoardWin, $Message, "Dev Control - $Title", $Buttons, 'Warning', $default) }
+    if ($script:DialogWin) { [Windows.MessageBox]::Show($script:DialogWin, $Message, "Dev Control - $Title", $Buttons, 'Warning', $default) }
     elseif ($win.IsVisible) { [Windows.MessageBox]::Show($win, $Message, "Dev Control - $Title", $Buttons, 'Warning', $default) }
     else { [Windows.MessageBox]::Show($Message, "Dev Control - $Title", $Buttons, 'Warning', $default) }
 }
@@ -230,15 +239,17 @@ function Set-Status($st) {
     $script:State.MemoryBytes = $st.MemoryBytes
 
     if ($st.Running) {
-        $ui.WslDot.Fill = Get-Brush '#22C55E'; $ui.WslText.Text = 'WSL: Running'
-        $ui.MemText.Text = "Memory: $(Format-DcBytes $st.MemoryBytes)"
+        $ui.WslDot.Fill = Get-Brush '#22C55E'; $ui.WslText.Text = 'WSL running'
+        $ui.MemText.Text = Format-DcBytes $st.MemoryBytes
     } else {
-        $ui.WslDot.Fill = Get-Brush '#6B7280'; $ui.WslText.Text = 'WSL: Stopped'
-        $ui.MemText.Text = 'Memory: -'
+        $ui.WslDot.Fill = Get-Brush '#6B7280'; $ui.WslText.Text = 'WSL stopped'
+        $ui.MemText.Text = ''
     }
     if ($script:Busy) { $ui.WslDot.Fill = Get-Brush '#F59E0B' }
     $detail = @($st.ModeMemory, $(if ($st.ModeProcessors) { "$($st.ModeProcessors) CPU" })) | Where-Object { $_ }
-    $ui.ModeText.Text = "Mode: $($st.Mode)" + $(if ($detail) { " ($($detail -join ' / '))" } else { '' })
+    # the pill shows the mode name; what it asks for is in the tooltip, what the VM really has in LiveText
+    $ui.ModeText.Text = [string]$st.Mode
+    $ui.ModeText.ToolTip = "Mode '$($st.Mode)' in $($settings.wslConfigPath)" + $(if ($detail) { ": $($detail -join ' / ')" } else { '' }) + ' (applies at the next WSL start)'
 
     if ($null -eq $ui.ModeCombo.SelectedItem -and $ui.ModeCombo.Items -contains $st.Mode) { $ui.ModeCombo.SelectedItem = $st.Mode }
     if ($script:Tray) {
@@ -252,7 +263,7 @@ function Set-Status($st) {
     } elseif (-not $st.Running -and $was -ne $false) {
         if ($null -ne $was) { Log 'WSL: Stopped.' }
         $script:Containers = @(); $script:Tools = @(); $script:VSCodeCount = 0
-        $ui.LiveText.Text = 'Live: -'
+        $ui.LiveText.Text = ''
         if ($script:Projects.Count -eq 0) { $script:Projects = @(Get-DcProjectCache) }
         $script:ProjectsCached = $true
     }
@@ -264,7 +275,7 @@ function Update-LinuxInfo {
     Start-Bg -Name 'linuxinfo' -Kind 'data' -Work { Get-DcLinuxInfo } -Done {
         param($r, $e)
         if ($e -or -not $r) { return }
-        $ui.LiveText.Text = "Live: $($r[0].Cpus) CPU / $(Format-DcBytes $r[0].MemBytes)"
+        $ui.LiveText.Text = "The VM has $($r[0].Cpus) CPU / $(Format-DcBytes $r[0].MemBytes)"
     }
 }
 
@@ -276,16 +287,17 @@ function Get-CfgValue($Cfg, [string]$Key, $Default) {
 }
 function Test-Pinned([string]$Name) { [bool](Get-CfgValue (Get-Cfg $Name) 'pinned' $false) }
 
-# Per-user view state (expanded groups, show hidden, filters, folders already seen) - survives restarts,
-# separate from projects.json.
+# Per-user view state (tab, sort, log open, when projects were last used, folders already seen) -
+# survives restarts, separate from projects.json. Keys of older versions (expanded, showHidden,
+# statusFilter, groupFilter) are ignored and dropped on the next save.
 function Import-UiState {
     try {
         if (Test-Path $script:UiStatePath) {
             $j = Get-Content -Raw -Path $script:UiStatePath | ConvertFrom-Json
-            if ($j.expanded) { foreach ($p in $j.expanded.PSObject.Properties) { $script:GroupExpanded[$p.Name] = [bool]$p.Value } }
-            $script:ShowHidden = [bool]$j.showHidden
-            if ($j.PSObject.Properties['statusFilter'] -and @('all', 'running', 'stopped') -contains $j.statusFilter) { $script:StatusFilter = [string]$j.statusFilter }
-            if ($j.PSObject.Properties['groupFilter']) { $script:GroupFilter = [string]$j.groupFilter }
+            if ($j.PSObject.Properties['view'] -and $j.view) { $script:View = [string]$j.view }
+            if ($j.PSObject.Properties['sort'] -and @('recent', 'name') -contains $j.sort) { $script:Sort = [string]$j.sort }
+            $script:LogOpen = [bool]$j.logOpen
+            if ($j.used) { foreach ($p in $j.used.PSObject.Properties) { $script:Used[$p.Name] = [int64]$p.Value } }
             if ($j.PSObject.Properties['seen'] -and $null -ne $j.seen) {
                 $script:Seen = New-Object 'System.Collections.Generic.HashSet[string]'
                 foreach ($n in @($j.seen)) { [void]$script:Seen.Add([string]$n) }
@@ -296,13 +308,20 @@ function Import-UiState {
 
 function Save-UiState {
     try {
-        $state = [ordered]@{
-            expanded = $script:GroupExpanded; showHidden = $script:ShowHidden
-            statusFilter = $script:StatusFilter; groupFilter = $script:GroupFilter
-        }
+        $used = [ordered]@{}
+        foreach ($k in @($script:Used.Keys | Sort-Object)) { $used[$k] = $script:Used[$k] }
+        $state = [ordered]@{ view = $script:View; sort = $script:Sort; logOpen = $script:LogOpen; used = $used }
         if ($script:Seen) { $state.seen = @($script:Seen | Sort-Object) }
         [IO.File]::WriteAllText($script:UiStatePath, (ConvertTo-DcJson $state), (New-Object Text.UTF8Encoding $false))
     } catch { Log "Could not save ui-state.json: $($_.Exception.Message)" }
+}
+
+# Recency = the later of "last used from Dev Control" and the folder's own last activity (git commit or
+# newest file, from Get-DcProjects).
+function Set-Used([string]$Name) {
+    if (-not $Name) { return }
+    $script:Used[$Name] = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    Save-UiState
 }
 
 # "New" badge: a folder that appeared since the user last looked. The first live listing (fresh install,
@@ -315,9 +334,12 @@ function Update-Seen {
         Save-UiState
         return
     }
-    # forget folders that no longer exist, so the list does not grow forever
+    # forget folders that no longer exist, so the lists do not grow forever
     $gone = @($script:Seen | Where-Object { $names -notcontains $_ })
-    if ($gone.Count) { foreach ($n in $gone) { [void]$script:Seen.Remove($n) }; Save-UiState }
+    $goneUsed = @($script:Used.Keys | Where-Object { $names -notcontains $_ })
+    foreach ($n in $gone) { [void]$script:Seen.Remove($n) }
+    foreach ($n in $goneUsed) { $script:Used.Remove($n) }
+    if ($gone.Count + $goneUsed.Count) { Save-UiState }
 }
 
 function Test-NewProject([string]$Name) { $script:Seen -and -not $script:ProjectsCached -and -not $script:Seen.Contains($Name) }
@@ -334,14 +356,13 @@ function Import-Config([switch]$Quiet) {
     try {
         $script:ProjectCfg = Get-DcProjectConfig
         $script:ConfigMeta = Get-DcConfigFile
-        $ui.PinnedHint.Text = ''
+        $script:ConfigError = ''
         if (-not $Quiet) { Log "Loaded projects.json ($($script:ProjectCfg.Count) configured project(s))." }
     } catch {
         $script:ProjectCfg = @{}
-        $ui.PinnedHint.Text = 'projects.json has an error - see log (menu ... > Edit projects.json).'
+        $script:ConfigError = 'projects.json has an error - see the log (menu ... > Edit projects.json).'
         Log "projects.json could not be read: $($_.Exception.Message)"
     }
-    Update-TrayRunMenu
     Update-Enablement
 }
 
@@ -353,17 +374,20 @@ function Update-Enablement {
     $run  = $script:State.Running -eq $true
     $idle = Get-Idle
     $free = $idle -and -not $script:Seq
+    # Only the WSL buttons that do something now: Start while stopped; Stop while running, plus
+    # "Switch to <mode>" when another mode is picked in the combo.
+    $pick = [string]$ui.ModeCombo.SelectedItem
+    $switch = $run -and $pick -and $pick -ne $script:State.Mode
     $ui.StartBtn.IsEnabled = $free
+    $ui.StartBtn.Content = if ($switch) { "Switch to $pick" } else { 'Start WSL' }
+    $ui.StartBtn.Visibility = if (-not $run -or $switch) { 'Visible' } else { 'Collapsed' }
     $ui.StopWslBtn.IsEnabled = $free -and $run
-    $ui.RefreshBtn.IsEnabled = $idle -and $run
-    $ui.StopAllBtn.IsEnabled = $idle -and $run -and $script:Containers.Count -gt 0
-    $ui.StopAllBtn.Visibility = if ($run -and $script:Containers.Count -gt 0) { 'Visible' } else { 'Collapsed' }
+    $ui.StopWslBtn.Visibility = if ($run) { 'Visible' } else { 'Collapsed' }
     $ui.CodeOpenBtn.IsEnabled = $free
     $ui.CodeOpenWinBtn.IsEnabled = $true
     $ui.CodeQuitBtn.IsEnabled = $free -and $run -and $script:VSCodeCount -gt 0
-    $ui.CodeText.Text = if (-not $run) { 'WSL is stopped, so Linux VS Code is not running.' }
-        elseif ($script:VSCodeCount -gt 0) { "Linux VS Code running in WSL: $($script:VSCodeCount) instance(s)." }
-        else { 'Linux VS Code is not running.' }
+    $ui.CodeQuitBtn.Visibility = if ($run -and $script:VSCodeCount -gt 0) { 'Visible' } else { 'Collapsed' }
+    $ui.CodeText.Text = if ($run -and $script:VSCodeCount -gt 0) { "Quit ($($script:VSCodeCount))" } else { '' }
     if ($script:TrayItems.Stop) { $script:TrayItems.Stop.Enabled = $free -and $run }
     if ($script:TrayItems.Start) { $script:TrayItems.Start.Enabled = $free }
     if ($script:TrayItems.Run) { $script:TrayItems.Run.Enabled = $free }
@@ -417,39 +441,27 @@ function Get-ComposePolicy($p) {
 
 function Format-Age([int64]$Epoch) {
     if ($Epoch -le 0) { return '' }
-    $d = [int](([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $Epoch) / 86400)
-    if ($d -lt 1) { 'today' } elseif ($d -eq 1) { 'yesterday' } elseif ($d -lt 60) { "$d days ago" } else { "$([int]($d / 30)) months ago" }
+    $s = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $Epoch
+    if ($s -lt 3600) { return 'just now' }
+    if ($s -lt 86400) { return "$([int][Math]::Floor($s / 3600))h ago" }
+    $d = [int][Math]::Floor($s / 86400)
+    if ($d -eq 1) { 'yesterday' } elseif ($d -lt 14) { "$d days ago" } elseif ($d -lt 60) { "$([int][Math]::Floor($d / 7)) weeks ago" }
+    elseif ($d -lt 730) { "$([int][Math]::Floor($d / 30)) months ago" } else { "$([int][Math]::Floor($d / 365)) years ago" }
 }
 
-# A project with no "group" in projects.json is Ungrouped (top of the list, where new folders show up).
+# A project with no "group" in projects.json is Ungrouped (its own tab, where new folders show up).
 function Get-GroupName($p) {
     $g = [string](Get-CfgValue (Get-Cfg $p.Name) 'group' '')
     if ($g.Trim()) { return $g.Trim() }
     $script:Ungrouped
 }
 
-function Get-GroupRank([string]$Group) {
-    if ($Group -eq $script:Ungrouped) { return -1 }
-    if ($Group -eq $script:OtherGroup) { return 100002 }
-    $order = @(Get-CfgValue $script:ConfigMeta 'groups' @())
-    $i = [array]::IndexOf($order, $Group)
-    if ($i -ge 0) { return $i }
-    100000
-}
-
-# The user's groups in display order: projects.json "groups" first (empty ones too), then any group a
+# The user's groups in tab order: projects.json "groups" first (empty ones too), then any group a
 # project names that the list lacks. Ungrouped is not a real group and is not included.
 function Get-AllGroups {
     $cfg = @(Get-CfgValue $script:ConfigMeta 'groups' @() | Where-Object { $_ -and $_ -ne $script:Ungrouped })
-    $used = @($script:AllRows | Where-Object { $_.IsProject -and $_.Group -ne $script:Ungrouped } | ForEach-Object { $_.Group })
+    $used = @($script:Projects | ForEach-Object { Get-GroupName $_ } | Where-Object { $_ -ne $script:Ungrouped })
     @(@($cfg) + @($used) | Select-Object -Unique)
-}
-
-# The user's last choice (ui-state.json) wins over "collapsed" in projects.json.
-function Test-GroupExpanded([string]$Group) {
-    if ($script:GroupExpanded.ContainsKey($Group)) { return [bool]$script:GroupExpanded[$Group] }
-    $collapsed = @(Get-CfgValue $script:ConfigMeta 'collapsed' @())
-    -not ($collapsed -contains $Group)
 }
 
 function Get-DisplayName([string]$Name) {
@@ -487,7 +499,8 @@ function Get-ProjectRows {
         $tools = @(Get-CfgValue $cfg 'tools' @() | Where-Object { $_ })
         $r = New-Object DevControl.ProjectRow
         $r.Name = $p.Name; $r.Title = Get-DisplayName $p.Name; $r.Folder = $dir; $r.IsProject = $true
-        $r.Group = Get-GroupName $p; $r.GroupExpanded = Test-GroupExpanded $r.Group
+        $r.Group = Get-GroupName $p; $r.HasGroup = $r.Group -ne $script:Ungrouped
+        $r.GroupLabel = if ($r.HasGroup) { $r.Group } else { 'No group' }
         $r.Mode = [string](Get-CfgValue $cfg 'mode' ''); $r.HasMode = [bool]$r.Mode
         $r.Url = [string](Get-CfgValue $cfg 'url' ''); $r.HasUrl = [bool]$r.Url
         $r.Description = [string](Get-CfgValue $cfg 'description' ''); $r.HasDescription = [bool]$r.Description.Trim()
@@ -497,6 +510,9 @@ function Get-ProjectRows {
                      elseif ($pflavor -eq 'windows') { 'Open in Windows VS Code (Remote - WSL; the project''s codeFlavor); starts WSL first if it is stopped' }
                      elseif ($pflavor -eq 'linux') { 'Open in Linux VS Code (the project''s codeFlavor); starts WSL first if it is stopped' }
                      else { "Open in $flavor (the editor setting codeFlavor picks); starts WSL first if it is stopped" }
+        $r.CodeIsWindows = if ($pflavor) { $pflavor -eq 'windows' } else { $settings.codeFlavor -eq 'windows' }
+        $last = if ($p.PSObject.Properties['LastActive'] -and $p.LastActive) { [int64]$p.LastActive } else { [int64]0 }
+        $r.Recent = [Math]::Max($last, [int64]$(if ($script:Used.ContainsKey($p.Name)) { $script:Used[$p.Name] } else { 0 }))
         $r.Children = New-Object 'System.Collections.Generic.List[DevControl.ChildRow]'
         $r.Worktrees = New-Object 'System.Collections.Generic.List[DevControl.WorktreeRow]'
         $cs = @($script:Containers | Where-Object { $_.Dir -eq $cdir })
@@ -572,6 +588,7 @@ function Get-ProjectRows {
             $w.Info = (Get-WorktreeInfo $p) + $(if ($r.IsRunning) { "  -  running: $($r.ShortStatus)" } else { '' })
             $w.StatusColor = if ($r.IsRunning) { '#22C55E' } else { '#6B7280' }
             $parent.Worktrees.Add($w)
+            $parent.Recent = [Math]::Max($parent.Recent, $r.Recent)   # work in a worktree counts for the repo
             foreach ($c in $r.Children) { $c.Detail = "worktree $($p.Name)  |  $($c.Detail)"; $parent.Children.Add($c) }
             continue
         }
@@ -581,87 +598,161 @@ function Get-ProjectRows {
         $r.HasChildren = $r.Children.Count -gt 0
         $r.HasWorktrees = $r.Worktrees.Count -gt 0
         if ($r.HasWorktrees) { $r.WorktreeBadge = "$($r.Worktrees.Count) worktree$(if ($r.Worktrees.Count -ne 1) { 's' })" }
+        # second line of the card: what is going on, then how recently it was used
+        $parts = @()
+        if ($script:ProjectOps[$r.Name]) { $parts += $r.Status }
+        elseif ($r.IsRunning) { $parts += "Running: $($r.ShortStatus)" }
+        elseif ($r.StatusColor -eq '#F59E0B') { $parts += $r.Status }
+        $wr = @($r.Worktrees | Where-Object { $_.Running }).Count
+        if ($wr) { $parts += "$wr worktree(s) running" }
+        $age = Format-Age $r.Recent
+        if ($age) { $parts += $age }
+        $r.StatusLine = $parts -join $script:Sep
     }
 
     $otherC = @($script:Containers | Where-Object { -not $usedC[$_.Id] })
     $otherT = @($script:Tools | Where-Object { -not $usedT["$($_.Slug)/$($_.Tool)"] })
     if ($otherC.Count + $otherT.Count -gt 0) {
         $r = New-Object DevControl.ProjectRow
-        $r.Name = 'Not part of a listed project'; $r.Title = $r.Name; $r.IsProject = $false
-        $r.Group = $script:OtherGroup; $r.GroupExpanded = Test-GroupExpanded $r.Group
+        $r.Name = 'Not part of a listed project'; $r.Title = 'Other containers and tools'; $r.IsProject = $false
+        $r.Group = $script:OtherGroup; $r.GroupLabel = ''
         $r.Status = "$($otherC.Count) container(s), $($otherT.Count) tool(s)"; $r.StatusText = "$($otherC.Count + $otherT.Count) running"; $r.StatusColor = '#22C55E'
+        $r.StatusLine = "Running: $($r.Status) whose folder is not a listed project"
         $r.IsRunning = $true
         $r.Facts = 'Containers and tools whose folder is not one of the projects above.'
         $r.Children = New-Object 'System.Collections.Generic.List[DevControl.ChildRow]'
         foreach ($c in $otherC) { $r.Children.Add((New-ContainerChild $c)) }
         foreach ($t in $otherT) { $r.Children.Add((New-ToolChild $t '')) }
         $r.HasChildren = $true
-        $r.IsExpanded = if ($script:CardExpanded.ContainsKey($r.Name)) { [bool]$script:CardExpanded[$r.Name] } else { $true }
+        $r.IsExpanded = if ($script:CardExpanded.ContainsKey($r.Name)) { [bool]$script:CardExpanded[$r.Name] } else { $false }
         [void]$top.Add($r)
     }
+    , (Sort-Rows $top)
+}
+
+# Pinned first, then most recently used (or A-Z), then the "other containers" row.
+function Sort-Rows($Rows) {
+    $key = if ($script:Sort -eq 'name') { @{ Expression = { $_.Title } } } else { @{ Expression = { $_.Recent }; Descending = $true } }
+    $kind = @{ Expression = { if (-not $_.IsProject) { 2 } elseif ($_.IsPinned) { 0 } else { 1 } } }
     $sorted = New-Object System.Collections.ArrayList
-    $orderOf = { param($n) $v = Get-CfgValue (Get-Cfg $n) 'order' $null; if ($null -eq $v) { 100000 } else { [int]$v } }
-    foreach ($r in @($top | Sort-Object @{ Expression = { Get-GroupRank $_.Group } }, Group, @{ Expression = { & $orderOf $_.Name } }, Title)) { [void]$sorted.Add($r) }
+    foreach ($r in @($Rows | Sort-Object $kind, $key, @{ Expression = { $_.Title } })) { [void]$sorted.Add($r) }
     , $sorted
 }
 
-function Test-RowMatches($r) {
-    if ($r.IsHiddenRow -and -not $script:ShowHidden) { return $false }
-    if ($script:GroupFilter -and $r.Group -ne $script:GroupFilter) { return $false }
-    $running = $r.IsRunning -or @($r.Worktrees | Where-Object { $_.Running }).Count -gt 0
-    if ($script:StatusFilter -eq 'running' -and -not $running) { return $false }
-    if ($script:StatusFilter -eq 'stopped' -and ($running -or -not $r.IsProject)) { return $false }
-    $q = $script:Search.Trim()
-    if ($q) {
-        $hay = @($r.Title, $r.Name, $r.Group, $r.Description) + @($r.Worktrees | ForEach-Object { $_.Name })
-        if (-not @($hay | Where-Object { $_ -and $_.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) { return $false }
+function Test-Running($r) { $r.IsRunning -or @($r.Worktrees | Where-Object { $_.Running }).Count -gt 0 }
+
+# Tabs: all | running | g:<group> | ungrouped | hidden. Hidden projects only show in the Hidden tab.
+function Test-InView($r, [string]$View) {
+    if ($View -eq 'hidden') { return [bool]($r.IsProject -and $r.IsHiddenRow) }
+    if ($r.IsHiddenRow) { return $false }
+    if ($View -eq 'running') { return [bool](Test-Running $r) }
+    if ($View -eq 'ungrouped') { return [bool]($r.IsProject -and -not $r.HasGroup) }
+    if ($View.StartsWith('g:')) { return [bool]($r.IsProject -and $r.Group -eq $View.Substring(2)) }
+    $true
+}
+
+# Every word of the query must appear in the title, folder name, path, group, mode, description or a worktree name.
+function Test-SearchMatch($r, [string]$Query) {
+    if (-not $Query) { return $true }
+    $hay = (@($r.Title, $r.Name, $r.Folder, $r.GroupLabel, $r.Mode, $r.Description) + @($r.Worktrees | ForEach-Object { $_.Name }) | Where-Object { $_ }) -join "`n"
+    foreach ($w in ($Query -split '\s+' | Where-Object { $_ })) {
+        if ($hay.IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
     }
     $true
 }
 
-# Keeps the filter controls (chip counts, group list) in step with the data.
-function Update-FilterControls {
+# The tab strip: key, label, count. Ungrouped and Hidden appear only when they have something.
+function Get-Views {
+    $vis = @($script:AllRows | Where-Object { $_.IsProject -and -not $_.IsHiddenRow })
+    $views = New-Object System.Collections.ArrayList
+    [void]$views.Add(@{ Key = 'all'; Label = 'All'; Count = $vis.Count })
+    [void]$views.Add(@{ Key = 'running'; Label = 'Running'; Count = @($vis | Where-Object { Test-Running $_ }).Count })
+    foreach ($g in Get-AllGroups) { [void]$views.Add(@{ Key = "g:$g"; Label = $g; Count = @($vis | Where-Object { $_.Group -eq $g }).Count }) }
+    $n = @($vis | Where-Object { -not $_.HasGroup }).Count
+    if ($n -or $script:View -eq 'ungrouped') { [void]$views.Add(@{ Key = 'ungrouped'; Label = $script:Ungrouped; Count = $n }) }
+    $n = @($script:AllRows | Where-Object { $_.IsProject -and $_.IsHiddenRow }).Count
+    if ($n) { [void]$views.Add(@{ Key = 'hidden'; Label = 'Hidden'; Count = $n }) }
+    , $views
+}
+
+# Rebuilt only when a tab, a count or the selection changes (so a drag over the tabs is not interrupted).
+function Update-Tabs($Views) {
+    $key = (@($Views | ForEach-Object { "$($_.Key)=$($_.Count)" }) -join '|') + "#$($script:View)"
+    if ($key -eq $script:TabsKey) { return }
+    $script:TabsKey = $key
     $script:SyncingFilters = $true
     try {
-        $pool = @($script:AllRows | Where-Object { $_.IsProject -and ($script:ShowHidden -or -not $_.IsHiddenRow) })
-        $nRun = @($pool | Where-Object { $_.IsRunning -or @($_.Worktrees | Where-Object { $_.Running }).Count }).Count
-        $ui.FilterAll.Content = "All  $($pool.Count)"
-        $ui.FilterRunning.Content = "Running  $nRun"
-        $ui.FilterStopped.Content = "Stopped  $($pool.Count - $nRun)"
-        $ui.FilterAll.IsChecked = $script:StatusFilter -eq 'all'
-        $ui.FilterRunning.IsChecked = $script:StatusFilter -eq 'running'
-        $ui.FilterStopped.IsChecked = $script:StatusFilter -eq 'stopped'
-        $groups = @('All groups')
-        if (@($script:AllRows | Where-Object { $_.Group -eq $script:Ungrouped }).Count) { $groups += $script:Ungrouped }
-        $groups += Get-AllGroups
-        if ($script:GroupFilter -and $groups -notcontains $script:GroupFilter) { $script:GroupFilter = '' }   # renamed / deleted
-        if (($groups -join "`n") -ne (@($ui.GroupFilter.Items) -join "`n")) { $ui.GroupFilter.ItemsSource = $groups }
-        $want = if ($script:GroupFilter) { $script:GroupFilter } else { 'All groups' }
-        if ([string]$ui.GroupFilter.SelectedItem -ne $want) { $ui.GroupFilter.SelectedItem = $want }
+        $ui.ViewTabs.Children.Clear()
+        foreach ($v in $Views) {
+            $rb = New-Object Windows.Controls.RadioButton
+            $rb.Style = $win.FindResource('Tab'); $rb.GroupName = 'View'; $rb.Tag = $v.Key
+            $sp = New-Object Windows.Controls.StackPanel; $sp.Orientation = 'Horizontal'
+            $t1 = New-Object Windows.Controls.TextBlock; $t1.Text = $v.Label
+            $t2 = New-Object Windows.Controls.TextBlock; $t2.Text = [string]$v.Count; $t2.Margin = '7,0,0,0'; $t2.Foreground = Get-Brush '#6B7280'
+            [void]$sp.Children.Add($t1); [void]$sp.Children.Add($t2)
+            $rb.Content = $sp
+            $rb.IsChecked = $v.Key -eq $script:View
+            $rb.ToolTip = if ($v.Key.StartsWith('g:')) { "Drop a project here to move it into '$($v.Label)'. Right-click to rename, move or delete the group." }
+                          elseif ($v.Key -eq 'ungrouped') { 'Projects in no group (new folders land here). Drop a project here to take it out of its group.' }
+                          elseif ($v.Key -eq 'hidden') { 'Hidden projects. Drop a project here to hide it.' }
+                          elseif ($v.Key -eq 'running') { 'Projects with running containers or background tools' }
+                          else { 'Every project except hidden ones' }
+            [void]$ui.ViewTabs.Children.Add($rb)
+        }
+        $nb = New-Object Windows.Controls.Button
+        $nb.Style = $win.FindResource('BtnGhost'); $nb.Tag = 'newgroup'; $nb.AllowDrop = $true; $nb.Margin = '0,0,4,6'; $nb.Padding = '10,4'
+        $nb.Foreground = Get-Brush '#9AA0A6'
+        $nb.Content = '+ New group'
+        $nb.ToolTip = 'Create a group. Drop a project here to put it in a new group.'
+        [void]$ui.ViewTabs.Children.Add($nb)
     } finally { $script:SyncingFilters = $false }
+}
+
+function Set-View([string]$View) {
+    if ($script:SyncingFilters -or $script:View -eq $View) { return }
+    $script:View = $View
+    Save-UiState
+    Show-Projects
 }
 
 function Show-Projects {
     if ($script:Dragging -or $script:EditingName) { return }   # a rebuild would pull the item out from under the mouse / the caret
     $all = Get-ProjectRows
     $script:AllRows = @($all)
+    $views = Get-Views
+    if (-not @($views | Where-Object { $_.Key -eq $script:View }).Count) { $script:View = 'all' }   # group renamed / deleted
+    $q = $script:Search.Trim()
     $rows = New-Object System.Collections.ArrayList
-    foreach ($r in $all) { if (Test-RowMatches $r) { [void]$rows.Add($r) } }
-    $script:LastRows = @($rows)
-    $view = [System.Windows.Data.ListCollectionView]::new($rows)
-    $view.GroupDescriptions.Add((New-Object System.Windows.Data.PropertyGroupDescription 'Group'))
-    $ui.ProjectList.ItemsSource = $view
-    Update-FilterControls
-    $ui.PinnedList.ItemsSource = @($all | Where-Object { $_.IsProject -and -not $_.IsHiddenRow -and $_.IsPinned })
-    if (-not $ui.PinnedHint.Text.StartsWith('projects.json') -or -not $ui.PinnedHint.Text) {
-        $ui.PinnedHint.Text = if (@($ui.PinnedList.ItemsSource).Count -eq 0) { 'No pinned projects. Use a project''s ... menu to pin it.' } else { '' }
+    $rest = New-Object System.Collections.ArrayList
+    foreach ($r in $all) {
+        if (-not (Test-InView $r $script:View) -or -not (Test-SearchMatch $r $q)) { continue }
+        # while searching, titles that start with the query come first
+        if ($q -and $r.Title.StartsWith($q, [StringComparison]::OrdinalIgnoreCase)) { [void]$rows.Add($r) } else { [void]$rest.Add($r) }
     }
-    $run = $script:State.Running -eq $true
-    $nc = $script:Containers.Count
-    $ui.ProjectsHint.Text = if (-not $settings.projectsRoot) { $DcNoProjectsRoot }
-        elseif ($rows.Count -eq 0 -and $all.Count -gt 0) { 'No project matches the filter.' }
-        elseif (-not $run) { 'WSL is stopped. Run starts it in the project''s mode (list is cached).' }
-        else { "$nc container(s), $(@($script:Tools | Where-Object { $_.Running }).Count) tool(s) running  -  click a project for details" }
+    foreach ($r in $rest) { [void]$rows.Add($r) }
+    if ($script:ActiveName -and -not @($rows | Where-Object { $_.Name -eq $script:ActiveName }).Count) { $script:ActiveName = $null }
+    if ($q -and -not $script:ActiveName -and $rows.Count) { $script:ActiveName = $rows[0].Name }
+    foreach ($r in $rows) { $r.IsActive = $r.Name -eq $script:ActiveName }
+    $script:LastRows = @($rows)
+    $ui.ProjectList.ItemsSource = $rows
+    Update-Tabs $views
+
+    $inGroup = $script:View.StartsWith('g:')
+    $ui.GroupTools.Visibility = if ($inGroup) { 'Visible' } else { 'Collapsed' }
+    $ui.SortText.Text = if ($script:Sort -eq 'name') { 'Name' } else { 'Recent' }
+    $label = @($views | Where-Object { $_.Key -eq $script:View })[0].Label
+    $ui.EmptyAddBtn.Visibility = 'Collapsed'
+    $ui.EmptyText.Text = if (-not $settings.projectsRoot) { $DcNoProjectsRoot }
+        elseif ($q) { "No project matches '$q'" + $(if ($script:View -ne 'all') { " in $label." } else { '.' }) }
+        elseif ($inGroup) { $ui.EmptyAddBtn.Visibility = 'Visible'; "No projects in $label yet. Drop a project on its tab, or:" }
+        elseif ($script:View -eq 'running') { 'Nothing is running.' }
+        else { 'No projects yet.' }
+    $ui.EmptyState.Visibility = if ($rows.Count -eq 0) { 'Visible' } else { 'Collapsed' }
+    $ui.ProjectsHint.Text = if ($script:ConfigError) { $script:ConfigError }
+        elseif ($settings.projectsRoot -and $script:State.Running -eq $false) { 'WSL is stopped. Run starts it in the project''s mode; the list is from the last time it ran.' }
+        else { '' }
+    $ui.ProjectsHint.Visibility = if ($ui.ProjectsHint.Text) { 'Visible' } else { 'Collapsed' }
+    Update-TrayRunMenu
 }
 
 # ---------------------------------------------------------------- data refresh (Linux queries)
@@ -763,7 +854,30 @@ function Invoke-Lifecycle($p) {
         $script:State.Running = $null   # force a fresh transition so lists reload
         Start-StatusPoll
         Update-Enablement
+        if ($e -and $e.Message -like 'WSL did not stop*') { Invoke-ForceStopFlow $c.Then ($c.Type -eq 'start'); return }
         if ($c.Then) { & $c.Then (-not $e) }
+    }
+}
+
+# Offered when wsl --shutdown (and --shutdown --force) left WSL running. Needs admin (UAC).
+function Invoke-ForceStopFlow([scriptblock]$Then, [bool]$WasRestart) {
+    $msg = "WSL did not stop.`n`nForce-stop it? This ends the WSL virtual machine directly " +
+           "(Windows asks for administrator permission). Unsaved work in Linux is lost.`n`n" +
+           "Task Manager cannot end vmmemWSL; this is the way to stop it without restarting Windows."
+    if (-not (Confirm-Dc $msg 'Force stop WSL')) { Log 'Force stop cancelled.'; if ($Then) { & $Then $false }; return }
+    Log 'Force-stopping WSL...'
+    $script:Busy = $true
+    Update-Enablement
+    Start-Bg -Name 'lifecycle' -Kind 'action' -Work { Stop-DcWslForce } -Context @{ Then = $Then; WasRestart = $WasRestart } -Done {
+        param($r, $e, $c)
+        $script:Busy = $false
+        if ($e) { Log "FAILED: $($e.Message)" } else { Log ($r -join ' ') }
+        $script:State.Running = $null
+        Start-StatusPoll
+        Update-Enablement
+        # A mode switch stopped here: WSL is down but not started in the new mode.
+        if ($c.WasRestart -and -not $e) { Log 'Start WSL again to switch modes.' }
+        if ($c.Then) { & $c.Then ((-not $e) -and -not $c.WasRestart) }
     }
 }
 
@@ -811,6 +925,7 @@ function Start-Sequence([string]$Kind, [string]$Name) {
     if ($script:Busy -or $script:PendingLifecycle) { Log 'A WSL start/shutdown is in progress.'; return }
     if ($Kind -notin @('run', 'code', 'codewin', 'codedef') -and -not $script:State.Running) { Log "WSL is stopped - nothing to $Kind."; return }
     $steps = Get-SequenceSteps $Kind $Name
+    if ($Kind -in @('run', 'code', 'codewin', 'codedef')) { Set-Used $Name }   # recency sort
     $script:Seq = @{ Label = "$Kind $Name"; Name = $Name; Steps = $steps; Index = 0 }
     Log "== $Kind $Name ($(@($steps | ForEach-Object { $_.Text }) -join ' > '))"
     Invoke-NextStep
@@ -1003,38 +1118,46 @@ function Resolve-GroupName([string]$Group) {
 }
 function Test-ReservedGroup([string]$Group) { @($script:OtherGroup, 'All groups') -contains $Group }
 
-# Puts $Name into $Group just before $Before ('' = at the end) and renumbers that group's order.
-# $Group = Ungrouped removes the project's group.
-function Move-ProjectTo([string]$Name, [string]$Group, [string]$Before = '') {
+# Puts $Name into $Group ('' or Ungrouped = no group). A group that does not exist yet is created
+# (appended to the tab order). The list is sorted by recency or name, so no "order" is kept.
+function Move-ProjectTo([string]$Name, [string]$Group) {
     $Group = Resolve-GroupName $Group
-    if (-not $Group -or (Test-ReservedGroup $Group)) { return }
-    $ung = $Group -eq $script:Ungrouped
-    $members = New-Object System.Collections.ArrayList
-    foreach ($m in (Get-GroupMembers $Group)) { if ($m -ne $Name) { [void]$members.Add($m) } }
-    $idx = if ($Before) { $members.IndexOf($Before) } else { -1 }
-    if ($idx -lt 0) { $idx = $members.Count }
-    $members.Insert($idx, $Name)
+    if (Test-ReservedGroup $Group) { Log "'$Group' is reserved - pick another group name."; return }
+    $ung = -not $Group -or $Group -eq $script:Ungrouped
     $row = Get-RowByName $Name
-    $from = if ($row) { $row.Group } else { $script:Ungrouped }
+    if ($row -and (($ung -and -not $row.HasGroup) -or $row.Group -eq $Group)) { return }   # already there
     $allGroups = Get-AllGroups
-    Edit-Config $(if ($from -eq $Group) { "Moved $Name within $Group." } else { "Moved $Name to $(if ($ung) { 'Ungrouped' } else { "group '$Group'" })." }) {
+    Edit-Config "Moved $(Get-DisplayName $Name) to $(if ($ung) { 'no group' } else { "group '$Group'" })." {
         param($c)
-        for ($i = 0; $i -lt $members.Count; $i++) { Set-CfgProp (Get-CfgEntry $c $members[$i]) 'order' $i }
         $e = Get-CfgEntry $c $Name
+        Remove-CfgProp $e 'order'
         if ($ung) { Remove-CfgProp $e 'group'; return }
         Set-CfgProp $e 'group' $Group
-        if ($allGroups -notcontains $Group) {
-            # new group: place it right after the group the project came from
-            $full = New-Object System.Collections.ArrayList
-            foreach ($g in $allGroups) { [void]$full.Add($g) }
-            $at = $full.IndexOf($from)
-            if ($at -lt 0) { [void]$full.Add($Group) } else { $full.Insert($at + 1, $Group) }
-            Set-CfgProp $c 'groups' @($full)
-        }
+        if ($allGroups -notcontains $Group) { Set-CfgProp $c 'groups' @(@($allGroups) + $Group) }
     }
+    Set-Seen $Name
 }
 
-# An empty group is kept in projects.json "groups", so it can be filled by dragging.
+# Makes $Names exactly the members of $Group: listed projects move in (from wherever they were),
+# current members that are not listed become Ungrouped. Hidden members are left alone unless listed.
+function Set-GroupMembers([string]$Group, [string[]]$Names) {
+    $Names = @($Names | Where-Object { $_ })
+    $cur = @($script:Projects | Where-Object { (Get-GroupName $_) -eq $Group } | ForEach-Object { $_.Name })
+    $add = @($Names | Where-Object { $cur -notcontains $_ })
+    $drop = @($cur | Where-Object { $Names -notcontains $_ -and -not (Get-RowByName $_).IsHiddenRow })
+    if (-not ($add.Count + $drop.Count)) { return }
+    $allGroups = Get-AllGroups
+    Edit-Config "Group '$Group': $($add.Count) added, $($drop.Count) removed." {
+        param($c)
+        foreach ($n in $add) { $e = Get-CfgEntry $c $n; Set-CfgProp $e 'group' $Group; Remove-CfgProp $e 'order' }
+        foreach ($n in $drop) { $e = Get-CfgEntry $c $n; Remove-CfgProp $e 'group'; Remove-CfgProp $e 'order' }
+        if ($allGroups -notcontains $Group) { Set-CfgProp $c 'groups' @(@($allGroups) + $Group) }
+    }
+    foreach ($n in $add) { Set-Seen $n }
+}
+
+# An empty group is kept in projects.json "groups", so it shows as a tab and can be filled.
+# Returns the group name when it was created.
 function Add-Group([string]$Group) {
     $Group = Resolve-GroupName $Group
     if (-not $Group) { return }
@@ -1042,6 +1165,20 @@ function Add-Group([string]$Group) {
     $allGroups = Get-AllGroups
     if ($allGroups -contains $Group) { Log "Group '$Group' already exists."; return }
     Edit-Config "Created group '$Group'." { param($c) Set-CfgProp $c 'groups' @(@($allGroups) + $Group) }
+    $Group
+}
+
+# "+ New group": name it, open its tab, then pick its projects (or, when a project was dropped on
+# the button, put that one in).
+function New-GroupFlow([string]$Project = '') {
+    $prompt = if ($Project) { "New group for '$(Get-DisplayName $Project)':" } else { 'Name of the new group:' }
+    $g = Read-DcText 'New group' $prompt
+    if (-not $g) { return }
+    if ($Project) { Move-ProjectTo $Project $g; return }
+    $g = Add-Group $g
+    if (-not $g) { return }
+    $script:View = "g:$g"; Save-UiState; Show-Projects
+    Show-GroupMembers $g
 }
 
 function Move-GroupStep([string]$Group, [int]$Delta) {
@@ -1050,7 +1187,7 @@ function Move-GroupStep([string]$Group, [int]$Delta) {
     $i = $order.IndexOf($Group); $j = $i + $Delta
     if ($i -lt 0 -or $j -lt 0 -or $j -ge $order.Count) { return }
     $order.RemoveAt($i); $order.Insert($j, $Group)
-    Edit-Config "Moved group '$Group' $(if ($Delta -lt 0) { 'up' } else { 'down' })." { param($c) Set-CfgProp $c 'groups' @($order) }
+    Edit-Config "Moved group '$Group' $(if ($Delta -lt 0) { 'left' } else { 'right' })." { param($c) Set-CfgProp $c 'groups' @($order) }
 }
 
 function Rename-Group([string]$Old, [string]$New) {
@@ -1060,16 +1197,13 @@ function Rename-Group([string]$Old, [string]$New) {
     # every project in the group, including hidden ones
     $members = @($script:Projects | Where-Object { (Get-GroupName $_) -eq $Old } | ForEach-Object { $_.Name })
     $allGroups = Get-AllGroups
+    if ($script:View -eq "g:$Old") { $script:View = "g:$New"; Save-UiState }   # stay on the renamed tab
     Edit-Config "Renamed group '$Old' to '$New'." {
         param($c)
         foreach ($m in $members) { Set-CfgProp (Get-CfgEntry $c $m) 'group' $New }
         Set-CfgProp $c 'groups' @($allGroups | ForEach-Object { if ($_ -eq $Old) { $New } else { $_ } } | Select-Object -Unique)
         Set-CfgProp $c 'collapsed' @(Get-CfgValue $c 'collapsed' @() | ForEach-Object { if ($_ -eq $Old) { $New } else { $_ } } | Select-Object -Unique)
     }
-    if ($script:GroupExpanded.ContainsKey($Old)) { $script:GroupExpanded[$New] = $script:GroupExpanded[$Old]; $script:GroupExpanded.Remove($Old) }
-    if ($script:GroupFilter -eq $Old) { $script:GroupFilter = $New }
-    Save-UiState
-    Show-Projects
 }
 
 # Deletes the group; its projects become Ungrouped. Nothing on disk besides projects.json changes.
@@ -1283,113 +1417,60 @@ function Show-EditProject([string]$Name) {
     $script:EditDlg = $null
 }
 
-# ---- Manage groups: a board with one column per group; drag projects between columns.
-function Get-BoardColumns {
-    $cols = New-Object 'System.Collections.Generic.List[DevControl.BoardColumn]'
-    foreach ($g in @(@($script:Ungrouped) + @(Get-AllGroups))) {
-        $c = New-Object DevControl.BoardColumn
-        $c.Name = $g; $c.CanEdit = $g -ne $script:Ungrouped
-        $c.Items = New-Object 'System.Collections.Generic.List[DevControl.BoardItem]'
-        foreach ($r in @($script:AllRows | Where-Object { $_.IsProject -and $_.Group -eq $g })) {
-            $it = New-Object DevControl.BoardItem
-            $it.Name = $r.Name; $it.Title = $r.Title + $(if ($r.IsHiddenRow) { ' (hidden)' } else { '' })
-            $c.Items.Add($it)
-        }
-        $c.Hint = "$($c.Items.Count) project$(if ($c.Items.Count -ne 1) { 's' })" + $(if ($g -eq $script:Ungrouped) { '  -  new folders land here' } else { '' })
-        $cols.Add($c)
+# ---- Projects in group: a checklist of every project, ticked = in the group. Saving goes through
+# Set-GroupMembers (the self-test calls that directly).
+function Get-GroupPickItems([string]$Group) {
+    $items = New-Object 'System.Collections.Generic.List[DevControl.PickItem]'
+    # members first, then projects in no group, then the rest; most recent first inside each
+    $rank = { param($r) if ($r.Group -eq $Group) { 0 } elseif (-not $r.HasGroup) { 1 } else { 2 } }
+    foreach ($r in @($script:AllRows | Where-Object { $_.IsProject } | Sort-Object @{ Expression = { & $rank $_ } }, @{ Expression = { $_.Recent }; Descending = $true })) {
+        $it = New-Object DevControl.PickItem
+        $it.Name = $r.Name; $it.Title = $r.Title
+        $it.IsChecked = $r.Group -eq $Group; $it.WasChecked = $it.IsChecked
+        $sub = @()
+        if ($r.Group -ne $Group) { $sub += $(if ($r.HasGroup) { "in $($r.Group) - ticking moves it here" } else { 'no group' }) }
+        if ($r.IsHiddenRow) { $sub += 'hidden' }
+        $age = Format-Age $r.Recent
+        if ($age) { $sub += $age }
+        $it.Sub = $sub -join $script:Sep
+        $items.Add($it)
     }
-    , $cols
+    , $items
 }
 
-# Drop $Name on column $Group: on the chip $Target (before it, or after it when $After), or at the end.
-function Invoke-BoardDrop([string]$Name, [string]$Group, [string]$Target = '', [bool]$After = $false) {
-    if (-not $Name -or $Target -eq $Name) { return }
-    $before = $Target
-    if ($Target -and $After) {
-        $m = @(Get-GroupMembers $Group | Where-Object { $_ -ne $Name })
-        $k = [array]::IndexOf($m, $Target)
-        $before = if ($k -ge 0 -and $k + 1 -lt $m.Count) { $m[$k + 1] } else { '' }
+function Show-GroupMembers([string]$Group) {
+    if (-not $Group -or $script:DialogWin) { return }
+    $w = Import-DialogXaml 'GroupMembers.xaml'
+    $w.Title = "Projects in $Group"
+    $w.FindName('HeadText').Text = "Projects in $Group"
+    $all = Get-GroupPickItems $Group
+    $script:PickState = @{ All = $all; Group = $Group; Window = $w }
+    $list = $w.FindName('Items')
+    $list.ItemsSource = $all
+    $count = {
+        $s = $script:PickState
+        $n = @($s.All | Where-Object { $_.IsChecked }).Count
+        $s.Window.FindName('CountText').Text = "$n project(s) in $($s.Group)"
     }
-    Move-ProjectTo $Name $Group $before
-}
-
-function Update-Board {
-    if (-not $script:BoardWin) { return }
-    $cols = Get-BoardColumns
-    $script:BoardWin.FindName('Board').ItemsSource = $cols
-    $script:BoardWin.FindName('StatusText').Text = "$($cols.Count - 1) group(s), $(@($script:AllRows | Where-Object { $_.IsProject }).Count) project(s). Saved to projects.json."
-}
-
-function Get-BoardTarget($el) {
-    $t = @{ Item = $null; ItemEl = $null; Column = $null }
-    while ($el) {
-        if ($el -is [Windows.FrameworkElement]) {
-            $dc = $el.DataContext
-            if (-not $t.Item -and $dc -is [DevControl.BoardItem] -and $el -is [Windows.Controls.ContentPresenter]) { $t.Item = $dc; $t.ItemEl = $el }
-            if ($dc -is [DevControl.BoardColumn]) { $t.Column = $dc; break }
-        }
-        $el = Get-ParentElement $el
-    }
-    $t
-}
-
-function Show-ManageGroups {
-    if ($script:BoardWin) { $script:BoardWin.Activate() | Out-Null; return }
-    $w = Import-DialogXaml 'ManageGroups.xaml'
-    $script:BoardWin = $w
-    $board = $w.FindName('Board')
-    Update-Board
-    $w.FindName('NewGroupBtn').add_Click({
-        $n = Read-DcText 'New group' 'Name of the new group:' '' $script:BoardWin
-        if ($n) { Add-Group $n; Update-Board }
+    & $count
+    $script:PickCount = $count
+    # a tick changes the count; checkboxes raise Click, which bubbles to the list
+    $list.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{ & $script:PickCount })
+    $fb = $w.FindName('FilterBox')
+    $fb.add_TextChanged({
+        $s = $script:PickState
+        $q = $this.Text.Trim()
+        $s.Window.FindName('FilterHint').Visibility = if ($this.Text) { 'Collapsed' } else { 'Visible' }
+        $s.Window.FindName('Items').ItemsSource = if ($q) {
+            , @($s.All | Where-Object { $_.Title.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $_.Name.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        } else { $s.All }
     })
-    $board.AddHandler([Windows.Controls.Button]::ClickEvent, [Windows.RoutedEventHandler]{
-        param($s, $e)
-        $b = $e.OriginalSource
-        if (-not ($b -is [Windows.Controls.Button])) { return }
-        $g = [string]$b.Tag
-        switch ($b.Uid) {
-            'gleft'   { Move-GroupStep $g -1 }
-            'gright'  { Move-GroupStep $g 1 }
-            'grename' { $n = Read-DcText 'Rename group' "New name for group '$g':" $g $script:BoardWin; if ($n) { Rename-Group $g $n } }
-            'gdelete' { Remove-GroupFlow $g }
-        }
-        Update-Board
-    })
-    $board.add_PreviewMouseLeftButtonDown({
-        param($s, $e)
-        $script:BoardDrag = $null
-        if (Test-InButton $e.OriginalSource) { return }
-        $t = Get-BoardTarget $e.OriginalSource
-        if ($t.Item) { $script:BoardDrag = @{ Name = $t.Item.Name; Start = $e.GetPosition($s) } }
-    })
-    $board.add_PreviewMouseMove({
-        param($s, $e)
-        $d = $script:BoardDrag
-        if (-not $d -or $e.LeftButton -ne 'Pressed') { return }
-        $p = $e.GetPosition($s)
-        if ([Math]::Abs($p.X - $d.Start.X) -lt 6 -and [Math]::Abs($p.Y - $d.Start.Y) -lt 6) { return }
-        $script:BoardDrag = $null
-        [void][Windows.DragDrop]::DoDragDrop($s, (New-Object Windows.DataObject('DevControlProject', $d.Name)), 'Move')
-    })
-    $board.add_DragOver({
-        param($s, $e)
-        $e.Effects = if ($e.Data.GetDataPresent('DevControlProject') -and (Get-BoardTarget $e.OriginalSource).Column) { 'Move' } else { 'None' }
-        $e.Handled = $true
-    })
-    $board.add_Drop({
-        param($s, $e)
-        $e.Handled = $true
-        if (-not $e.Data.GetDataPresent('DevControlProject')) { return }
-        $t = Get-BoardTarget $e.OriginalSource
-        if (-not $t.Column) { return }
-        $after = $false
-        if ($t.ItemEl) { $after = $e.GetPosition($t.ItemEl).Y -gt ($t.ItemEl.ActualHeight / 2) }
-        $target = if ($t.Item) { $t.Item.Name } else { '' }
-        Invoke-BoardDrop ([string]$e.Data.GetData('DevControlProject')) $t.Column.Name $target $after
-        Update-Board
-    })
-    try { [void]$w.ShowDialog() } finally { $script:BoardWin = $null }
+    $w.FindName('SaveBtn').add_Click({ [Windows.Window]::GetWindow($this).DialogResult = $true })
+    $w.add_ContentRendered({ [void]$this.FindName('FilterBox').Focus() })
+    $script:DialogWin = $w
+    try { $ok = $w.ShowDialog() } finally { $script:DialogWin = $null }
+    if ($ok) { Set-GroupMembers $Group @($all | Where-Object { $_.IsChecked } | ForEach-Object { $_.Name }) }
+    $script:PickState = $null
 }
 
 # Small dark text prompt (WPF has no InputBox). Returns the text or $null.
@@ -1435,11 +1516,8 @@ function Invoke-MenuAction($a) {
             'edit'     { Show-EditProject $a[1] }
             'rename'   { Start-Rename $a[1] }
             'moveto'   { Move-ProjectTo $a[1] $a[2] }
-            'newgroup' {
-                $g = Read-DcText 'New group' "New group for '$(Get-DisplayName $a[1])':"
-                if ($g) { Move-ProjectTo $a[1] $g }
-            }
-            'managegroups' { Show-ManageGroups }
+            'newgroup' { New-GroupFlow $a[1] }
+            'members'  { Show-GroupMembers $a[1] }
             'pin'      { Set-ProjectFlag $a[1] 'pinned' $true }
             'unpin'    { Set-ProjectFlag $a[1] 'pinned' $false }
             'hide'     { Set-ProjectFlag $a[1] 'hidden' $true }
@@ -1453,6 +1531,8 @@ function Invoke-MenuAction($a) {
             'gup'      { Move-GroupStep $a[1] -1 }
             'gdown'    { Move-GroupStep $a[1] 1 }
             'gdelete'  { Remove-GroupFlow $a[1] }
+            'refresh'  { Update-Projects; Update-Runtime }
+            'stopall'  { Stop-AllContainersFlow }
             'editjson' {
                 $p = Get-DcConfigPath
                 if (Test-Path $p) { Start-Process notepad.exe -ArgumentList "`"$p`"" } else { Log "projects.json not found: $p" }
@@ -1462,8 +1542,31 @@ function Invoke-MenuAction($a) {
                 if ($script:Seen) { foreach ($p in $script:Projects) { [void]$script:Seen.Add([string]$p.Name) }; Save-UiState }
                 Show-Projects
             }
+            'log'      { Set-LogOpen (-not $script:LogOpen) }
         }
     } catch { Log "Menu action failed: $($_.Exception.Message)" }
+}
+
+# The group picker: what the group label on a card opens, and the card menu's "Group" submenu.
+# The current group is ticked; picking another moves the project there.
+function Add-GroupPickItems($Items, [string]$Name) {
+    $row = Get-RowByName $Name
+    foreach ($g in @(Get-AllGroups)) {
+        $mi = New-DcMenuItem $g @('moveto', $Name, $g)
+        $mi.IsChecked = $row -and $row.Group -eq $g
+        [void]$Items.Add($mi)
+    }
+    $none = New-DcMenuItem 'No group' @('moveto', $Name, '')
+    $none.IsChecked = $row -and -not $row.HasGroup
+    [void]$Items.Add($none)
+    [void]$Items.Add((New-Object Windows.Controls.Separator))
+    [void]$Items.Add((New-DcMenuItem 'New group...' @('newgroup', $Name)))
+}
+
+function New-GroupPickMenu([string]$Name) {
+    $m = New-Object Windows.Controls.ContextMenu
+    Add-GroupPickItems $m.Items $Name
+    $m
 }
 
 function New-ProjectMenu([string]$Name) {
@@ -1472,14 +1575,10 @@ function New-ProjectMenu([string]$Name) {
     if (-not $row) { return $m }
     [void]$m.Items.Add((New-DcMenuItem 'Edit details...' @('edit', $Name)))
     [void]$m.Items.Add((New-DcMenuItem 'Rename...' @('rename', $Name)))
-    $to = New-DcMenuItem 'Move to group' $null
-    foreach ($g in @(@($script:Ungrouped) + @(Get-AllGroups))) { if ($g -ne $row.Group) { [void]$to.Items.Add((New-DcMenuItem $g @('moveto', $Name, $g))) } }
-    [void]$to.Items.Add((New-Object Windows.Controls.Separator))
-    [void]$to.Items.Add((New-DcMenuItem 'New group...' @('newgroup', $Name)))
+    $to = New-DcMenuItem 'Group' $null
+    Add-GroupPickItems $to.Items $Name
     [void]$m.Items.Add($to)
-    [void]$m.Items.Add((New-DcMenuItem 'Manage groups...' @('managegroups')))
-    [void]$m.Items.Add((New-Object Windows.Controls.Separator))
-    if ($row.IsPinned) { [void]$m.Items.Add((New-DcMenuItem 'Unpin' @('unpin', $Name))) } else { [void]$m.Items.Add((New-DcMenuItem 'Pin' @('pin', $Name))) }
+    if ($row.IsPinned) { [void]$m.Items.Add((New-DcMenuItem 'Unpin' @('unpin', $Name))) } else { [void]$m.Items.Add((New-DcMenuItem 'Pin to top' @('pin', $Name))) }
     if ($row.IsHiddenRow) { [void]$m.Items.Add((New-DcMenuItem 'Unhide' @('unhide', $Name))) } else { [void]$m.Items.Add((New-DcMenuItem 'Hide' @('hide', $Name))) }
     [void]$m.Items.Add((New-Object Windows.Controls.Separator))
     [void]$m.Items.Add((New-DcMenuItem 'Open in Linux VS Code' @('seq', 'code', $Name) $row.CanCode))
@@ -1488,27 +1587,33 @@ function New-ProjectMenu([string]$Name) {
     $m
 }
 
+# A group tab's menu (right-click on the tab, or ... next to Add projects).
 function New-GroupMenu([string]$Group) {
     $m = New-Object Windows.Controls.ContextMenu
-    if ($Group -ne $script:Ungrouped -and $Group -ne $script:OtherGroup) {
-        $groups = Get-AllGroups
-        $i = [array]::IndexOf($groups, $Group)
-        [void]$m.Items.Add((New-DcMenuItem 'Rename group...' @('grename', $Group)))
-        [void]$m.Items.Add((New-DcMenuItem 'Move group up' @('gup', $Group) ($i -gt 0)))
-        [void]$m.Items.Add((New-DcMenuItem 'Move group down' @('gdown', $Group) ($i -ge 0 -and $i -lt $groups.Count - 1)))
-        [void]$m.Items.Add((New-DcMenuItem 'Delete group (projects become Ungrouped)' @('gdelete', $Group)))
-        [void]$m.Items.Add((New-Object Windows.Controls.Separator))
-    }
-    [void]$m.Items.Add((New-DcMenuItem 'Manage groups...' @('managegroups')))
+    $groups = @(Get-AllGroups)
+    $i = [array]::IndexOf($groups, $Group)
+    [void]$m.Items.Add((New-DcMenuItem 'Add or remove projects...' @('members', $Group)))
+    [void]$m.Items.Add((New-DcMenuItem 'Rename group...' @('grename', $Group)))
+    [void]$m.Items.Add((New-DcMenuItem 'Move left' @('gup', $Group) ($i -gt 0)))
+    [void]$m.Items.Add((New-DcMenuItem 'Move right' @('gdown', $Group) ($i -ge 0 -and $i -lt $groups.Count - 1)))
+    [void]$m.Items.Add((New-Object Windows.Controls.Separator))
+    [void]$m.Items.Add((New-DcMenuItem 'Delete group (projects keep running, become ungrouped)' @('gdelete', $Group)))
     $m
 }
 
-function New-ProjectsMenu {
+# The header's ... menu: things used rarely enough not to need a button.
+function New-MoreMenu {
+    $run = $script:State.Running -eq $true
+    $idle = Get-Idle
     $m = New-Object Windows.Controls.ContextMenu
+    [void]$m.Items.Add((New-DcMenuItem 'Refresh now' @('refresh') ($idle -and $run)))
+    [void]$m.Items.Add((New-DcMenuItem "Stop all containers ($($script:Containers.Count))" @('stopall') ($idle -and $run -and $script:Containers.Count -gt 0)))
+    [void]$m.Items.Add((New-Object Windows.Controls.Separator))
     [void]$m.Items.Add((New-DcMenuItem 'Edit projects.json in Notepad' @('editjson')))
     [void]$m.Items.Add((New-DcMenuItem 'Reload projects.json' @('reload')))
-    [void]$m.Items.Add((New-Object Windows.Controls.Separator))
     [void]$m.Items.Add((New-DcMenuItem 'Clear all New badges' @('seenall') ([bool]@($script:AllRows | Where-Object { $_.IsNew }).Count)))
+    [void]$m.Items.Add((New-Object Windows.Controls.Separator))
+    [void]$m.Items.Add((New-DcMenuItem $(if ($script:LogOpen) { 'Hide activity log' } else { 'Show activity log' }) @('log')))
     $m
 }
 
@@ -1519,13 +1624,11 @@ function Open-Menu($Menu, $Target) {
     $script:LastMenu = $Menu
 }
 
-# ---- project list events: click a card header to open it, right-click for its menu, rename in place.
+# ---- project list events: click a card header to open it, right-click for its menu, drag it onto a
+# tab, rename in place.
 function Get-RowContext($el) {
     while ($el) {
-        if ($el -is [Windows.FrameworkElement]) {
-            $dc = $el.DataContext
-            if ($dc -is [DevControl.ProjectRow] -or $dc -is [Windows.Data.CollectionViewGroup]) { return $dc }
-        }
+        if ($el -is [Windows.FrameworkElement] -and $el.DataContext -is [DevControl.ProjectRow]) { return $el.DataContext }
         $el = Get-ParentElement $el
     }
     $null
@@ -1533,30 +1636,49 @@ function Get-RowContext($el) {
 function Test-InButton($el) {
     while ($el) {
         if ($el -is [Windows.Controls.Primitives.ButtonBase] -or $el -is [Windows.Controls.Primitives.ScrollBar] -or $el -is [Windows.Controls.Primitives.TextBoxBase]) { return $true }
-        if ($el -is [Windows.Controls.ItemsControl] -and ($el -eq $ui.ProjectList -or $el.Name -eq 'Board')) { return $false }
+        if ($el -is [Windows.Controls.ItemsControl] -and $el -eq $ui.ProjectList) { return $false }
         $el = Get-ParentElement $el
     }
     $false
 }
+function Get-HeaderRow($el) {
+    while ($el -and $el -ne $ui.ProjectList) {
+        if ($el -is [Windows.FrameworkElement] -and $el.Uid -eq 'hdr') { if ($el.DataContext -is [DevControl.ProjectRow]) { return $el.DataContext } else { return $null } }
+        $el = Get-ParentElement $el
+    }
+    $null
+}
 
 $ui.ProjectList.add_MouseLeftButtonUp({
     param($s, $e)
+    $script:RowDrag = $null
     if (Test-InButton $e.OriginalSource) { return }
-    $el = $e.OriginalSource
-    while ($el -and $el -ne $ui.ProjectList) {
-        if ($el -is [Windows.FrameworkElement] -and $el.Uid -eq 'hdr') {
-            if ($el.DataContext -is [DevControl.ProjectRow]) { Switch-Card $el.DataContext.Name }
-            return
-        }
-        $el = Get-ParentElement $el
-    }
+    $row = Get-HeaderRow $e.OriginalSource
+    if ($row) { Switch-Card $row.Name }
 })
 $ui.ProjectList.add_MouseRightButtonUp({
     param($s, $e)
     if (Test-InButton $e.OriginalSource) { return }
     $ctx = Get-RowContext $e.OriginalSource
-    if ($ctx -is [DevControl.ProjectRow] -and $ctx.IsProject) { Open-Menu (New-ProjectMenu $ctx.Name) $ui.ProjectList; $e.Handled = $true }
-    elseif ($ctx -is [Windows.Data.CollectionViewGroup]) { Open-Menu (New-GroupMenu ([string]$ctx.Name)) $ui.ProjectList; $e.Handled = $true }
+    if ($ctx -and $ctx.IsProject) { Open-Menu (New-ProjectMenu $ctx.Name) $ui.ProjectList; $e.Handled = $true }
+})
+$ui.ProjectList.add_PreviewMouseLeftButtonDown({
+    param($s, $e)
+    $script:RowDrag = $null
+    if (Test-InButton $e.OriginalSource) { return }
+    $row = Get-HeaderRow $e.OriginalSource
+    if ($row -and $row.IsProject -and -not $row.IsEditing) { $script:RowDrag = @{ Name = $row.Name; Start = $e.GetPosition($win) } }
+})
+$ui.ProjectList.add_PreviewMouseMove({
+    param($s, $e)
+    $d = $script:RowDrag
+    if (-not $d -or $e.LeftButton -ne 'Pressed') { return }
+    $p = $e.GetPosition($win)
+    if ([Math]::Abs($p.X - $d.Start.X) -lt 8 -and [Math]::Abs($p.Y - $d.Start.Y) -lt 8) { return }
+    $script:RowDrag = $null
+    $script:Dragging = $true   # no list rebuild while the row is held
+    try { [void][Windows.DragDrop]::DoDragDrop($s, (New-Object Windows.DataObject('DevControlProject', $d.Name)), 'Move') }
+    finally { $script:Dragging = $false; Clear-DropHot; Show-Projects }
 })
 $ui.ProjectList.add_PreviewKeyDown({
     param($s, $e)
@@ -1571,36 +1693,136 @@ $ui.ProjectList.AddHandler([Windows.UIElement]::LostKeyboardFocusEvent, [Windows
     if ($tb -is [Windows.Controls.TextBox] -and $tb.Uid -eq 'titlebox' -and [string]$tb.Tag -eq $script:EditingName) { Complete-Rename $true $tb.Text }
 })
 
-# ---- filters (saved in ui-state.json, except the search text)
-function Set-StatusFilter([string]$F) {
-    if ($script:SyncingFilters -or $script:StatusFilter -eq $F) { return }
-    $script:StatusFilter = $F
-    Save-UiState
-    Show-Projects
+# ---- tabs: click = view, right-click a group tab = its menu, drop a project = move it there.
+function Get-TabTarget($el) {
+    while ($el -and $el -ne $ui.ViewTabs) {
+        if (($el -is [Windows.Controls.RadioButton] -or $el -is [Windows.Controls.Button]) -and $el.Tag) { return $el }
+        $el = Get-ParentElement $el
+    }
+    $null
 }
-$ui.FilterAll.add_Checked({ Set-StatusFilter 'all' })
-$ui.FilterRunning.add_Checked({ Set-StatusFilter 'running' })
-$ui.FilterStopped.add_Checked({ Set-StatusFilter 'stopped' })
-$ui.GroupFilter.add_SelectionChanged({
-    if ($script:SyncingFilters) { return }
-    $g = [string]$ui.GroupFilter.SelectedItem
-    $g = if (-not $g -or $g -eq 'All groups') { '' } else { $g }
-    if ($g -eq $script:GroupFilter) { return }
-    $script:GroupFilter = $g
+# What dropping a project on a tab does ('' = nothing).
+function Get-DropAction([string]$Key) {
+    if ($Key.StartsWith('g:') -or $Key -in @('ungrouped', 'hidden', 'newgroup')) { return $Key }
+    ''
+}
+function Invoke-TabDrop([string]$Name, [string]$Key) {
+    if (-not $Name) { return }
+    if ($Key.StartsWith('g:')) { Move-ProjectTo $Name $Key.Substring(2) }
+    elseif ($Key -eq 'ungrouped') { Move-ProjectTo $Name '' }
+    elseif ($Key -eq 'hidden') { Set-ProjectFlag $Name 'hidden' $true }
+    elseif ($Key -eq 'newgroup') { New-GroupFlow $Name }
+}
+function Clear-DropHot {
+    if ($script:DropHot) { $script:DropHot.BorderBrush = [Windows.Media.Brushes]::Transparent; $script:DropHot = $null }
+}
+
+$ui.ViewTabs.AddHandler([Windows.Controls.Primitives.ToggleButton]::CheckedEvent, [Windows.RoutedEventHandler]{
+    param($s, $e)
+    if ($e.OriginalSource -is [Windows.Controls.RadioButton]) { Set-View ([string]$e.OriginalSource.Tag) }
+})
+$ui.ViewTabs.AddHandler([Windows.Controls.Button]::ClickEvent, [Windows.RoutedEventHandler]{
+    param($s, $e)
+    if ($e.OriginalSource -is [Windows.Controls.Button] -and [string]$e.OriginalSource.Tag -eq 'newgroup') { New-GroupFlow }
+})
+$ui.ViewTabs.add_PreviewMouseRightButtonUp({
+    param($s, $e)
+    $t = Get-TabTarget $e.OriginalSource
+    if ($t -and ([string]$t.Tag).StartsWith('g:')) { Open-Menu (New-GroupMenu ([string]$t.Tag).Substring(2)) $ui.ViewTabs; $e.Handled = $true }
+})
+$ui.ViewTabs.add_DragOver({
+    param($s, $e)
+    $e.Handled = $true
+    $t = Get-TabTarget $e.OriginalSource
+    $act = if ($t -and $e.Data.GetDataPresent('DevControlProject')) { Get-DropAction ([string]$t.Tag) } else { '' }
+    $e.Effects = if ($act) { 'Move' } else { 'None' }
+    if ($script:DropHot -ne $t) { Clear-DropHot }
+    if ($act -and $t) { $t.BorderBrush = Get-Brush '#3B82F6'; $script:DropHot = $t }
+})
+$ui.ViewTabs.add_DragLeave({ Clear-DropHot })
+$ui.ViewTabs.add_Drop({
+    param($s, $e)
+    $e.Handled = $true
+    Clear-DropHot
+    $t = Get-TabTarget $e.OriginalSource
+    if (-not $t -or -not $e.Data.GetDataPresent('DevControlProject')) { return }
+    $script:Dragging = $false   # let the move redraw the list
+    Invoke-TabDrop ([string]$e.Data.GetData('DevControlProject')) ([string]$t.Tag)
+})
+
+$ui.AddToGroupBtn.add_Click({ if ($script:View.StartsWith('g:')) { Show-GroupMembers $script:View.Substring(2) } })
+$ui.EmptyAddBtn.add_Click({ if ($script:View.StartsWith('g:')) { Show-GroupMembers $script:View.Substring(2) } })
+$ui.GroupMenuBtn.add_Click({ if ($script:View.StartsWith('g:')) { Open-Menu (New-GroupMenu $script:View.Substring(2)) $ui.GroupMenuBtn } })
+$ui.SortBtn.add_Click({
+    $script:Sort = if ($script:Sort -eq 'recent') { 'name' } else { 'recent' }
     Save-UiState
     Show-Projects
 })
+
+# ---- search: filters the current tab as you type. Up / Down pick a row, Enter opens it in VS Code,
+# Ctrl+Enter runs or stops it, Esc clears. Ctrl+F (or /) jumps here from anywhere in the window.
+function Move-Active([int]$Delta) {
+    $rows = @($script:LastRows | Where-Object { $_.IsProject })
+    if (-not $rows.Count) { return }
+    $i = -1
+    for ($k = 0; $k -lt $rows.Count; $k++) { if ($rows[$k].Name -eq $script:ActiveName) { $i = $k } }
+    $i = if ($i -lt 0) { if ($Delta -gt 0) { 0 } else { $rows.Count - 1 } } else { [Math]::Max(0, [Math]::Min($rows.Count - 1, $i + $Delta)) }
+    $script:ActiveName = $rows[$i].Name
+    foreach ($r in $script:LastRows) { $r.IsActive = $r.Name -eq $script:ActiveName }
+    $c = $ui.ProjectList.ItemContainerGenerator.ContainerFromItem($rows[$i])
+    if ($c) { $c.BringIntoView() }
+}
+
+function Invoke-Active([bool]$Primary) {
+    $r = @($script:LastRows | Where-Object { $_.IsProject -and $_.Name -eq $script:ActiveName })[0]
+    if (-not $r) { return }
+    if ($Primary) {
+        if ($r.ShowPrimary -and $r.PrimaryEnabled) { Start-Sequence $r.PrimaryUid $r.Name } else { Log "$($r.Title): nothing to run or stop right now." }
+    } elseif ($r.CanCode) { Start-Sequence 'codedef' $r.Name }
+}
+
 $ui.SearchBox.add_TextChanged({
     $script:Search = $ui.SearchBox.Text
+    $script:ActiveName = $null   # the best match gets the highlight
     $ui.SearchHint.Visibility = if ($ui.SearchBox.Text) { 'Collapsed' } else { 'Visible' }
+    $ui.SearchClearBtn.Visibility = if ($ui.SearchBox.Text) { 'Visible' } else { 'Collapsed' }
     Show-Projects
 })
-$ui.SearchBox.add_KeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { $ui.SearchBox.Text = '' } })
-$ui.ShowHiddenBox.add_Click({
-    $script:ShowHidden = [bool]$ui.ShowHiddenBox.IsChecked
+$ui.SearchBox.add_PreviewKeyDown({
+    param($s, $e)
+    switch ([string]$e.Key) {
+        'Down'   { $e.Handled = $true; Move-Active 1 }
+        'Up'     { $e.Handled = $true; Move-Active -1 }
+        'Return' { $e.Handled = $true; Invoke-Active ([Windows.Input.Keyboard]::Modifiers -band [Windows.Input.ModifierKeys]::Control) }
+        'Escape' {
+            $e.Handled = $true
+            if ($ui.SearchBox.Text) { $ui.SearchBox.Text = '' }
+            else { $script:ActiveName = $null; foreach ($r in $script:LastRows) { $r.IsActive = $false } }
+        }
+    }
+})
+$ui.SearchBox.add_GotKeyboardFocus({ $ui.SearchFrame.BorderBrush = Get-Brush '#3B82F6' })
+$ui.SearchBox.add_LostKeyboardFocus({ $ui.SearchFrame.BorderBrush = Get-Brush '#2E3138' })
+$ui.SearchClearBtn.add_Click({ $ui.SearchBox.Text = ''; [void]$ui.SearchBox.Focus() })
+$win.add_PreviewKeyDown({
+    param($s, $e)
+    $ctrl = [Windows.Input.Keyboard]::Modifiers -band [Windows.Input.ModifierKeys]::Control
+    $inText = [Windows.Input.Keyboard]::FocusedElement -is [Windows.Controls.Primitives.TextBoxBase]
+    if (($ctrl -and $e.Key -eq 'F') -or (-not $inText -and $e.Key -eq 'OemQuestion')) {
+        $e.Handled = $true; [void]$ui.SearchBox.Focus(); $ui.SearchBox.SelectAll()
+    }
+})
+
+# ---- activity log: one line at the bottom; click it to open the full log.
+function Set-LogOpen([bool]$Open) {
+    $script:LogOpen = $Open
+    $ui.LogPanel.Visibility = if ($Open) { 'Visible' } else { 'Collapsed' }
+    $ui.LastLogText.Visibility = if ($Open) { 'Hidden' } else { 'Visible' }
+    $ui.LogToggleText.Text = [string][char]$(if ($Open) { 0xE70D } else { 0xE70E })
+    if ($Open) { $ui.LogBox.ScrollToEnd() }
     Save-UiState
-    Show-Projects
-})
+}
+$ui.LogBar.add_MouseLeftButtonUp({ Set-LogOpen (-not $script:LogOpen) })
 
 # ---------------------------------------------------------------- window / tray plumbing
 
@@ -1617,17 +1839,28 @@ function Exit-App {
     $win.Close()
 }
 
+# Tray "Run project": pinned projects, then the most recently used ones (up to 8 in all) that have
+# something to run. Rebuilt only when that list changes.
 function Update-TrayRunMenu {
     if (-not $script:TrayItems.Run) { return }
+    $cand = @($script:AllRows | Where-Object { $_.IsProject -and -not $_.IsHiddenRow -and ($_.ShowRun -or $_.IsPinned) })
+    $pick = @(@($cand | Where-Object { $_.IsPinned } | Sort-Object Title) + @($cand | Where-Object { -not $_.IsPinned } | Sort-Object Recent -Descending) | Select-Object -First 8)
+    $key = @($pick | ForEach-Object { "$($_.Name)=$($_.Title)" }) -join '|'
+    if ($key -eq $script:TrayKey) { return }
+    $script:TrayKey = $key
     $script:TrayItems.Run.DropDownItems.Clear()
-    $pinned = @($script:ProjectCfg.Keys | Where-Object { Test-Pinned $_ } | Sort-Object { Get-DisplayName $_ })
-    foreach ($n in $pinned) {
-        $it = New-Object System.Windows.Forms.ToolStripMenuItem (Get-DisplayName $n)
-        $it.Tag = $n
+    $pinnedDone = $false
+    foreach ($r in $pick) {
+        if (-not $r.IsPinned -and -not $pinnedDone) {
+            $pinnedDone = $true
+            if ($script:TrayItems.Run.DropDownItems.Count) { [void]$script:TrayItems.Run.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) }
+        }
+        $it = New-Object System.Windows.Forms.ToolStripMenuItem $r.Title
+        $it.Tag = $r.Name
         $it.add_Click({ param($s, $e) Start-Sequence 'run' ([string]$s.Tag) })
         [void]$script:TrayItems.Run.DropDownItems.Add($it)
     }
-    $script:TrayItems.Run.Visible = $pinned.Count -gt 0
+    $script:TrayItems.Run.Visible = $pick.Count -gt 0
 }
 
 if ($settings.trayIcon) {
@@ -1676,15 +1909,13 @@ if ($settings.trayIcon) {
 # ---------------------------------------------------------------- event wiring
 
 $ui.ModeCombo.ItemsSource = @(Get-DcModes)
+$ui.ModeCombo.add_SelectionChanged({ Update-Enablement })   # Start WSL <-> Switch to <mode>
 $ui.StartBtn.add_Click({ Start-WslFlow ([string]$ui.ModeCombo.SelectedItem) })
 $ui.StopWslBtn.add_Click({ Stop-WslFlow })
 $ui.CodeOpenBtn.add_Click({ Open-EmptyCode 'linux' })
 $ui.CodeOpenWinBtn.add_Click({ Open-EmptyCode 'windows' })
 $ui.CodeQuitBtn.add_Click({ Stop-VSCodeFlow })
-$ui.RefreshBtn.add_Click({ Update-Projects; Update-Runtime })
-$ui.StopAllBtn.add_Click({ Stop-AllContainersFlow })
-$ui.ManageGroupsBtn.add_Click({ Show-ManageGroups })
-$ui.ProjectsMenuBtn.add_Click({ Open-Menu (New-ProjectsMenu) $ui.ProjectsMenuBtn })
+$ui.MoreBtn.add_Click({ Open-Menu (New-MoreMenu) $ui.MoreBtn })
 
 # Buttons inside item templates: Uid = action, Tag = project name or child tag.
 $projectClick = [Windows.RoutedEventHandler]{
@@ -1701,29 +1932,17 @@ $projectClick = [Windows.RoutedEventHandler]{
         'codedef' { Start-Sequence 'codedef' $tag }
         'open'    {
             $u = [string](Get-CfgValue (Get-Cfg $tag) 'url' '')
-            if ($u -match '^https?://') { Start-Process $u; Log "Opened $u" } else { Log "No valid url for $tag" }
+            if ($u -match '^https?://') { Start-Process $u; Set-Used $tag; Log "Opened $u" } else { Log "No valid url for $tag" }
         }
         'child'   { Stop-Child $tag }
         'menu'    { Open-Menu (New-ProjectMenu $tag) $b }
+        'group'   { Open-Menu (New-GroupPickMenu $tag) $b }
         'toggle'  { Switch-Card $tag }
         'rename'  { Start-Rename $tag }
         'edit'    { Show-EditProject $tag }
     }
 }
 $ui.ProjectList.AddHandler([Windows.Controls.Button]::ClickEvent, $projectClick)
-$ui.PinnedList.AddHandler([Windows.Controls.Button]::ClickEvent, $projectClick)
-# Remember expanded/collapsed groups across list refreshes.
-$groupToggle = [Windows.RoutedEventHandler]{
-    param($s, $e)
-    $x = $e.OriginalSource
-    if ($x -is [Windows.Controls.Expander] -and $x.Tag) {
-        $g = [string]$x.Tag
-        # expanders are recreated on every refresh and report the state we gave them: only save real changes
-        if ((Test-GroupExpanded $g) -ne $x.IsExpanded) { $script:GroupExpanded[$g] = $x.IsExpanded; Save-UiState }
-    }
-}
-$ui.ProjectList.AddHandler([Windows.Controls.Expander]::ExpandedEvent, $groupToggle)
-$ui.ProjectList.AddHandler([Windows.Controls.Expander]::CollapsedEvent, $groupToggle)
 
 $win.add_StateChanged({
     if ($win.WindowState -eq 'Minimized' -and $script:Tray -and $settings.minimizeToTray) { $win.Hide() }
@@ -1768,7 +1987,7 @@ $dataTimer.add_Tick({
 $script:Projects = @(Get-DcProjectCache)
 $script:ProjectsCached = $true
 Import-UiState
-$ui.ShowHiddenBox.IsChecked = $script:ShowHidden
+Set-LogOpen $script:LogOpen
 Import-Config
 Log "Dev Control started (distro: $($settings.distro), config: $($settings.wslConfigPath), modes: $($settings.modesDir))."
 if (-not $settings.projectsRoot) { Log $DcNoProjectsRoot }

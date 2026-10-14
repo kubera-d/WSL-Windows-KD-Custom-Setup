@@ -6,6 +6,11 @@
 #                                     clipboard / audio / font packages
 #   ./setup-linux.sh user             install launchers into ~/.local/bin, desktop entries, VS Code argv.json
 #   ./setup-linux.sh uninstall-user   remove what "user" installed (packages and argv.json are left alone)
+#   sudo ./setup-linux.sh journal     keep the Linux system log across WSL restarts and stop chrony
+#                                     fighting WSL's own clock sync (FIX-011 in docs/fixes.md)
+#   sudo ./setup-linux.sh earlyoom  end a runaway process before the VM thrashes to a standstill (FIX-014)
+#                                     and keep VS Code out of swap: vm.swappiness 10 (FIX-016)
+#   sudo ./setup-linux.sh uninstall-root   undo "journal" and "earlyoom"
 #   ./setup-linux.sh check            print what is installed
 set -eu
 
@@ -109,6 +114,45 @@ EOF
     # otherwise prompt about secret storage on every start.
     ensure_argv_key disable-hardware-acceleration true
     ensure_argv_key password-store '"basic"'
+
+    install_bookmarks
+}
+
+# The file dialogs of Linux VS Code (Electron uses the GTK chooser; there is no desktop portal) only
+# list $HOME and bookmarks, so the Windows drive was invisible unless you typed /mnt/c (FIX-013).
+# Two sidebar entries: the C: drive and the Windows user folder. GTK's bookmarks file has no comment
+# syntax, so there is no marker line: uninstall removes exactly the lines bookmark_lines prints.
+BOOKMARKS="${XDG_CONFIG_HOME:-$HOME/.config}/gtk-3.0/bookmarks"   # GTK 4 reads the same file
+
+uri_path() { printf 'file://%s' "$(printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/ /%20/g')"; }
+
+win_home() {   # Windows user profile as a Linux path, '' if interop is unavailable
+    p=$(cd /mnt/c 2>/dev/null && cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r') || p=""
+    case "$p" in [A-Za-z]:\\*) wslpath -u "$p" 2>/dev/null ;; esac
+}
+
+bookmark_lines() {
+    [ -d /mnt/c ] && printf '%s Windows (C:)\n' "$(uri_path /mnt/c)"
+    h=$(win_home)
+    if [ -n "$h" ] && [ -d "$h" ]; then printf '%s Windows home\n' "$(uri_path "$h")"; fi
+    return 0
+}
+
+install_bookmarks() {
+    mkdir -p "$(dirname "$BOOKMARKS")"
+    touch "$BOOKMARKS"
+    bookmark_lines | while IFS= read -r line; do
+        grep -qxF "$line" "$BOOKMARKS" || printf '%s\n' "$line" >>"$BOOKMARKS"
+    done
+    say "user: file dialogs show Windows (C:) and Windows home ($BOOKMARKS)"
+}
+
+uninstall_bookmarks() {
+    [ -f "$BOOKMARKS" ] || return 0
+    tmp="$BOOKMARKS.tmp.$$"
+    # drop our two entries (matched by label, whatever path they had), keep everything else
+    grep -vE '^file://[^ ]+ (Windows \(C:\)|Windows home)$' "$BOOKMARKS" >"$tmp" || true
+    if ! cmp -s "$tmp" "$BOOKMARKS"; then mv "$tmp" "$BOOKMARKS"; say "removed Windows bookmarks from $BOOKMARKS"; else rm -f "$tmp"; fi
 }
 
 uninstall_user() {
@@ -119,12 +163,115 @@ uninstall_user() {
     for d in code.desktop winbrowser.desktop; do
         if [ -f "$APPS/$d" ] && grep -q "$MARK" "$APPS/$d"; then rm -f "$APPS/$d"; say "removed $APPS/$d"; fi
     done
+    uninstall_bookmarks
     say "left in place: apt packages, Linux VS Code, ~/.vscode/argv.json settings"
+}
+
+JOURNALD_CONF=/etc/systemd/journald.conf.d/50-wsl-windows-kd-custom-setup.conf
+CHRONY_FLAG=/var/lib/wsl-windows-kd-custom-setup/chrony-disabled
+
+# WSL sets the Linux clock from Windows itself. chrony then steps it back ("System clock interference
+# detected"), journald rotates on every backwards jump ("Time jumped backwards, rotating") and its
+# 100-file limit deletes earlier boots within hours - the log of a slow/hung session is gone after a restart.
+install_journal() {
+    [ "$(id -u)" -eq 0 ] || { say "journal: must run as root (sudo)"; exit 1; }
+    mkdir -p "$(dirname "$JOURNALD_CONF")"
+    cat >"$JOURNALD_CONF" <<EOF
+# $MARK: keep the system log across WSL restarts (journalctl -b -1 = previous session).
+[Journal]
+Storage=persistent
+SystemMaxUse=1G
+SystemMaxFiles=1000
+EOF
+    systemctl restart systemd-journald 2>/dev/null || true
+    say "journald: persistent, up to 1G ($JOURNALD_CONF)"
+    if systemctl is-enabled chrony >/dev/null 2>&1; then
+        systemctl disable --now chrony >/dev/null 2>&1
+        mkdir -p "$(dirname "$CHRONY_FLAG")"; echo "$MARK" >"$CHRONY_FLAG"
+        say "chrony: disabled (WSL keeps the clock in sync with Windows)"
+    fi
+}
+
+# When Linux runs out of memory the WSL VM does not crash, it thrashes: RAM and swap full, load 100+,
+# every vCPU busy reclaiming, wsl.exe cannot even start a process (Wsl/Service/0x8007274c), and the
+# kernel OOM killer may never fire because reclaim still makes tiny progress (FIX-014). earlyoom ends
+# the worst process early instead. Thresholds: act when available RAM < 5% AND free swap < 50%.
+# Never pick VS Code, Claude Code or the WSLg / session plumbing; prefer test scripts and dev servers.
+EARLYOOM_DROPIN=/etc/systemd/system/earlyoom.service.d/50-wsl-windows-kd-custom-setup.conf
+EARLYOOM_FLAG=/var/lib/wsl-windows-kd-custom-setup/earlyoom-enabled
+EARLYOOM_AVOID='^(code|claude|init|systemd|systemd-.*|Xwayland|weston|sshd|dbus-daemon|pulseaudio|earlyoom)$'
+EARLYOOM_PREFER='^(python|python3|python3\.[0-9]+|node|workerd|java|pytest)$'
+
+install_earlyoom() {
+    [ "$(id -u)" -eq 0 ] || { say "earlyoom: must run as root (sudo)"; exit 1; }
+    if ! dpkg -s earlyoom >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y earlyoom >/dev/null
+    fi
+    mkdir -p "$(dirname "$EARLYOOM_DROPIN")"
+    cat >"$EARLYOOM_DROPIN" <<EOF
+# $MARK: end the worst runaway process before the WSL VM thrashes to a standstill (FIX-014).
+[Service]
+ExecStart=
+ExecStart=/usr/bin/earlyoom -m 5 -s 50 -r 3600 --avoid '$EARLYOOM_AVOID' --prefer '$EARLYOOM_PREFER'
+EOF
+    systemctl daemon-reload
+    if ! systemctl is-enabled earlyoom >/dev/null 2>&1; then
+        mkdir -p "$(dirname "$EARLYOOM_FLAG")"; echo "$MARK" >"$EARLYOOM_FLAG"
+    fi
+    systemctl enable earlyoom >/dev/null 2>&1
+    systemctl restart earlyoom
+    say "earlyoom: running (RAM < 5% and swap < 50% free -> ends the worst process; never VS Code/Claude)"
+    install_swappiness
+}
+
+# Under swap pressure the kernel (default swappiness 60) pages out idle memory of interactive apps too.
+# When Linux VS Code then stalls on swap-in, it stops reading WSLg's Wayland messages, Weston's per-client
+# buffer overflows ("libwayland: error in client communication") and WSLg drops the connection - VS Code
+# quits and every window and Claude session closes (FIX-016). 10 keeps app memory in RAM and swaps only
+# under real need. Applied live, no restart needed.
+SYSCTL_CONF=/etc/sysctl.d/60-wsl-windows-kd-custom-setup.conf
+
+install_swappiness() {
+    cat >"$SYSCTL_CONF" <<EOF
+# $MARK: keep interactive apps (Linux VS Code) in RAM; swap only under real pressure (FIX-016).
+vm.swappiness = 10
+EOF
+    sysctl -q -p "$SYSCTL_CONF"
+    say "swappiness: $(cat /proc/sys/vm/swappiness) ($SYSCTL_CONF)"
+}
+
+uninstall_root() {
+    [ "$(id -u)" -eq 0 ] || { say "uninstall-root: must run as root (sudo)"; exit 1; }
+    if [ -f "$SYSCTL_CONF" ] && grep -q "$MARK" "$SYSCTL_CONF"; then
+        rm -f "$SYSCTL_CONF"; sysctl -q -w vm.swappiness=60; sysctl -q --system >/dev/null 2>&1 || true
+        say "removed $SYSCTL_CONF (swappiness back to $(cat /proc/sys/vm/swappiness))"
+    fi
+    if [ -f "$EARLYOOM_DROPIN" ] && grep -q "$MARK" "$EARLYOOM_DROPIN"; then
+        rm -f "$EARLYOOM_DROPIN"; rmdir "$(dirname "$EARLYOOM_DROPIN")" 2>/dev/null || true
+        systemctl daemon-reload; say "removed $EARLYOOM_DROPIN"
+        if [ -f "$EARLYOOM_FLAG" ]; then
+            systemctl disable --now earlyoom >/dev/null 2>&1 || true; rm -f "$EARLYOOM_FLAG"
+            say "earlyoom: disabled again (package left installed)"
+        else
+            systemctl restart earlyoom 2>/dev/null || true
+        fi
+    fi
+    if [ -f "$JOURNALD_CONF" ] && grep -q "$MARK" "$JOURNALD_CONF"; then
+        rm -f "$JOURNALD_CONF"; systemctl restart systemd-journald 2>/dev/null || true; say "removed $JOURNALD_CONF"
+    fi
+    if [ -f "$CHRONY_FLAG" ]; then
+        systemctl enable --now chrony >/dev/null 2>&1 || true
+        rm -rf "$(dirname "$CHRONY_FLAG")"; say "chrony: enabled again"
+    fi
 }
 
 check() {
     for s in $SCRIPTS code; do printf '%-16s %s\n' "$s" "$( [ -e "$BIN/$s" ] && echo installed || echo missing)"; done
     printf '%-16s %s\n' "Linux VS Code" "$( [ -x /usr/share/code/bin/code ] && echo installed || echo missing)"
+    printf '%-16s %s\n' "journal kept" "$( [ -f "$JOURNALD_CONF" ] && echo installed || echo missing)"
+    printf '%-16s %s\n' "earlyoom" "$(systemctl is-active earlyoom 2>/dev/null || true)"
+    printf '%-16s %s\n' "swappiness" "$(cat /proc/sys/vm/swappiness)$( [ -f "$SYSCTL_CONF" ] && echo ' (set by setup)' )"
+    printf '%-16s %s\n' "Win bookmarks" "$(grep -qE ' Windows \(C:\)$' "$BOOKMARKS" 2>/dev/null && echo installed || echo missing)"
     for p in $PACKAGES; do printf '%-16s %s\n' "$p" "$(dpkg -s "$p" >/dev/null 2>&1 && echo installed || echo missing)"; done
 }
 
@@ -132,6 +279,9 @@ case "${1:-}" in
     packages) install_packages ;;
     user) install_user ;;
     uninstall-user) uninstall_user ;;
+    journal) install_journal ;;
+    earlyoom) install_earlyoom ;;
+    uninstall-root) uninstall_root ;;
     check) check ;;
-    *) say "usage: $0 packages|user|uninstall-user|check"; exit 2 ;;
+    *) say "usage: $0 packages|user|journal|earlyoom|uninstall-user|uninstall-root|check"; exit 2 ;;
 esac

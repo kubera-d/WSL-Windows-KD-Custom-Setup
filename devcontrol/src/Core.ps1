@@ -237,19 +237,101 @@ function Wait-DcWslState([bool]$Running, [int]$TimeoutSec) {
     return $false
 }
 
+# While this file is fresh (< 2 min), the WSLg Helper does not touch \\wsl.localhost: opening any
+# path there boots the distro straight back up (FIX-010 in docs/fixes.md). Start-DcWslBoot removes it.
+$script:DcStopMarker = Join-Path $script:DcDataDir 'wsl-stopping'
+function Set-DcStopMarker { try { [IO.File]::WriteAllText($script:DcStopMarker, (Get-Date).ToString('o')) } catch { } }
+
+# Down = no distro listed as running AND the VM process is gone (that is what frees memory/CPU).
+function Test-DcWslDown {
+    -not (Test-DcWslRunning) -and -not (Get-Process -Name 'vmmemWSL' -ErrorAction SilentlyContinue)
+}
+
+function Wait-DcWslDown([int]$TimeoutSec) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-DcWslDown) { return $true }
+        Start-Sleep -Milliseconds 700
+    }
+    return $false
+}
+
+# True if WSL stays down for $Sec seconds (something opening \\wsl.localhost or running wsl.exe
+# right after a shutdown boots it again).
+function Test-DcWslStaysDown([int]$Sec) {
+    $deadline = (Get-Date).AddSeconds($Sec)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 1000
+        if (-not (Test-DcWslDown)) { return $false }
+    }
+    return $true
+}
+
+# Windows-side WSL clients with their parent process, for the log when WSL comes back by itself.
+function Get-DcWslClients {
+    $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $byId = @{}; foreach ($p in $procs) { $byId[[int]$p.ProcessId] = $p }
+    @($procs | Where-Object { @('wsl.exe', 'wslhost.exe', 'wslrelay.exe', 'msrdc.exe') -contains $_.Name.ToLowerInvariant() } | ForEach-Object {
+        $par = $byId[[int]$_.ParentProcessId]
+        '{0} {1} (parent {2})' -f $_.Name, $_.ProcessId, $(if ($par) { "$($par.Name) $($par.ProcessId)" } else { '?' })
+    })
+}
+
+# wsl --shutdown, then wsl --shutdown --force; each must leave WSL down for 8 s. Throws
+# 'WSL did not stop...' otherwise - the UI then offers Stop-DcWslForce.
 function Stop-DcWsl {
-    Write-DcCallLog 'SHUT' '--shutdown'
-    $r = Invoke-DcProcess 'wsl.exe' '--shutdown' 90
-    if ($r.ExitCode -ne 0) { throw "wsl --shutdown failed ($($r.ExitCode)): $($r.Err)$($r.Out)" }
-    if (-not (Wait-DcWslState $false 30)) { throw 'WSL still reports running 30s after --shutdown' }
-    Write-DcLog 'WSL shut down'
-    'WSL shut down.'
+    $notes = @()
+    foreach ($a in @('--shutdown', '--shutdown --force')) {
+        Set-DcStopMarker
+        Write-DcCallLog 'SHUT' $a
+        try {
+            $r = Invoke-DcProcess 'wsl.exe' $a 45
+            if ($r.ExitCode -ne 0) { $notes += "wsl $a exited $($r.ExitCode): $(($r.Err + $r.Out).Trim())" }
+        } catch { $notes += $_.Exception.Message }
+        if (Wait-DcWslDown 20) {
+            if (Test-DcWslStaysDown 8) {
+                Write-DcLog "WSL shut down (wsl $a)"
+                return $(if ($a -eq '--shutdown') { 'WSL shut down.' } else { 'WSL shut down (forced).' })
+            }
+            $notes += "WSL started again right after wsl $a"
+            Write-DcLog ("WSL started again right after wsl $a. WSL clients now: " + ((Get-DcWslClients) -join '; '))
+        } else {
+            $notes += "still running 20s after wsl $a"
+        }
+    }
+    throw ('WSL did not stop: ' + ($notes -join '; '))
+}
+
+# Last resort (asks for admin rights via UAC): end the WSL VM through the Host Compute Service
+# (hcsdiag kill), then end wslservice.exe if the VM is still there. Task Manager cannot end
+# vmmemWSL - the hypervisor owns it. Unsaved work in Linux is lost.
+function Stop-DcWslForce {
+    Set-DcStopMarker
+    $script = Join-Path $script:DcDataDir 'force-stop-wsl.ps1'
+    @'
+$ids = @(& hcsdiag.exe list 2>$null | ForEach-Object { if ($_ -match '([0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27}).*\bWSL\s*$') { $Matches[1] } })
+foreach ($id in $ids) { & hcsdiag.exe kill $id }
+Start-Sleep -Seconds 5
+if (Get-Process -Name vmmemWSL -ErrorAction SilentlyContinue) {
+    Stop-Process -Name wslservice -Force -ErrorAction SilentlyContinue
+}
+'@ | Set-Content -Path $script -Encoding ASCII
+    Write-DcCallLog 'FORCE' 'hcsdiag kill <WSL VM> / Stop-Process wslservice (elevated)'
+    try {
+        $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -PassThru `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$script`""
+    } catch { throw "Force stop cancelled ($($_.Exception.Message))" }
+    [void]$p.WaitForExit(60000)
+    if (-not (Wait-DcWslDown 30)) { throw 'WSL is still running after the force stop. Restart Windows (Start > Power > Restart) - a normal restart works, no need to hold the power button.' }
+    Write-DcLog 'WSL force-stopped'
+    'WSL force-stopped.'
 }
 
 # The ONLY function that boots WSL on purpose.
 function Start-DcWslBoot {
     $s = Get-DcSettings
     $msgs = @()
+    Remove-Item -Force -ErrorAction SilentlyContinue $script:DcStopMarker
     if ($s.keepAlive) {
         # A long-lived hidden wsl.exe session keeps the distro from idling out after
         # the last terminal/VS Code window closes. wsl --shutdown ends it.
@@ -273,6 +355,11 @@ function Start-DcWslBoot {
         if ($r.ExitCode -ne 0) { throw "WSL start failed ($($r.ExitCode)): $($r.Err)" }
     }
     $msgs += "$($s.distro) is running."
+    # The WSLg Helper (repo install, optional) runs only while WSL runs and exits when it stops.
+    if (Get-ScheduledTask -TaskName 'WSLg Helper' -ErrorAction SilentlyContinue) {
+        try { Start-ScheduledTask -TaskName 'WSLg Helper' -ErrorAction Stop; $msgs += 'WSLg Helper started.' }
+        catch { $msgs += "WARNING: WSLg Helper did not start: $($_.Exception.Message)" }
+    }
     # Wait for dockerd (systemd starts it a moment after boot).
     $r = Invoke-DcLinux 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1' 90
     $msgs += if ($r.ExitCode -eq 0) { 'Docker is ready.' } else { 'WARNING: Docker did not respond within 60s.' }

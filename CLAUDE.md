@@ -45,16 +45,27 @@ Dev Control has its own developer guide: `devcontrol/CLAUDE.md`.
   (`HOME=$(mktemp -d) sh linux/setup-linux.sh user`).
 
 ### linux/setup-linux.sh
-- Modes: `packages` (root: Linux VS Code via Microsoft apt repo, wl-clipboard, xclip, sox, pulse utils,
+- Modes: `journal` (root: persistent journald drop-in, disables chrony - FIX-011), `uninstall-root`, `packages` (root: Linux VS Code via Microsoft apt repo, wl-clipboard, xclip, sox, pulse utils,
   Noto fonts, xdg-utils), `user` (launchers to `~/.local/bin`, desktop entries, argv.json keys), `uninstall-user`, `check`.
 
 ### windows/wslg-helper/wslg-helper.ps1
-- Installed to `%LOCALAPPDATA%\Programs\WslgHelper`, scheduled task `WSLg Helper` (logon, conhost --headless,
+- Installed to `%LOCALAPPDATA%\Programs\WslgHelper`, scheduled task `WSLg Helper` (at logon + every 2 min, so it runs whenever WSL runs however WSL was started; Dev Control `Start-DcWslBoot` also starts it; it exits when `vmmemWSL` is gone or the stop marker is fresh; conhost --headless,
   `powershell -STA`). Log: `wslg-helper.log` next to it. `-Status` prints both monitor layouts.
 - Monitor sync: parses `\\wsl.localhost\<distro>\mnt\wslg\weston.log` incrementally (`rdpMonitor[n]` blocks,
   group starts at index 0), compares with `EnumDisplayMonitors` (per-monitor DPI aware), restarts `msrdc.exe`.
   Also restarts it once after a live `Client: DisplayLayoutChange` even when the layouts match (FIX-009);
   `xf_peer_adjust_monitor_layout` marks a fresh connection and clears that flag.
+  Never restarts `msrdc` while a Linux window (`RAIL_WINDOW`, not `sub-surface`) is minimized - WSLg
+  does not re-send minimized windows on reconnect and nothing can restore them afterwards - or off every
+  screen (FIX-012). After a screen change it moves off-screen ones to the primary screen first
+  (`-Rescue` does it by hand). Replaces an unconvertible Linux HTML copy with its plain text (FIX-018). Also restarts msrdc 10 s after a WSLg wake that followed >= 20 min idle
+  (`rdp_rail_idle/wake_handler`; stale windows otherwise), and every 30 s recreates Dev Control's keep-alive
+  session (`exec sleep infinity`) if it is gone while the distro is up (FIX-017). After a Weston crash/restart
+  (weston.log `Command line:` again) it reopens Linux VS Code if its windows were up (FIX-020). Diagnosing with your own Win32 scans: output written inside an
+  `EnumWindows` scriptblock callback is lost - collect in C#.
+- Never wakes WSL: every `\\wsl.localhost` / `wsl.exe` access is gated by `Test-DistroUp` (fresh `vmmemWSL`,
+  Dev Control's `wsl-stopping` marker, cached `--list --running`). Opening `\\wsl.localhost` boots a stopped
+  distro (FIX-010).
 - Clipboard: `GetClipboardSequenceNumber` + clipboard owner PID (msrdc = came from Linux) + foreground PID.
   Focus enters Linux with a pending Windows image -> PNG -> `wl-copy --type image/png`; focus leaves with the
   clipboard unchanged since -> `Clipboard.SetImage` restores it.

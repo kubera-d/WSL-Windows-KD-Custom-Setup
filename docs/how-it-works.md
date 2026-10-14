@@ -113,12 +113,16 @@ run Docker Compose projects and open them in Linux VS Code. See [`devcontrol/REA
 | Where | What | Removed by uninstall.ps1 |
 |---|---|---|
 | Linux (root) | Linux VS Code via Microsoft apt repo (if missing); `wl-clipboard xclip sox libsox-fmt-pulse pulseaudio-utils fonts-noto-color-emoji fonts-noto-core xdg-utils` | no (listed) |
+| Linux (root) | `/etc/systemd/journald.conf.d/50-wsl-windows-kd-custom-setup.conf` (log kept across restarts); `chrony` disabled (FIX-011) | yes (chrony re-enabled) |
+| Linux (root) | `earlyoom` package + `/etc/systemd/system/earlyoom.service.d/50-wsl-windows-kd-custom-setup.conf` (ends a runaway process before the VM freezes; never VS Code / Claude) (FIX-014) | drop-in yes; service disabled if install enabled it; package stays |
+| Linux (root) | `/etc/sysctl.d/60-wsl-windows-kd-custom-setup.conf`: `vm.swappiness = 10` (keeps Linux VS Code in RAM so WSLg does not drop it) (FIX-016) | yes (back to 60) |
 | Linux `~/.local/bin` | `code-linux`, `code-linux-open`, `winbrowser`, `code` symlink | yes |
 | Linux `~/.local/share/applications` | `code.desktop` override, `winbrowser.desktop`; xdg default for http/https/mailto | yes |
 | Linux `~/.vscode/argv.json` | `disable-hardware-acceleration`, `password-store` (only if missing) | no |
+| Linux `~/.config/gtk-3.0/bookmarks` | `Windows (C:)` and `Windows home` entries in the file dialogs (FIX-013) | yes (only those two lines) |
 | Windows Start Menu / Desktop | `VS Code (Linux)`, `VS Code (Windows)`, `Dev Control` | yes |
 | `HKCU\Software\Classes\Directory[\Background]\shell\VSCodeWSL` | right-click "Open in VS Code (Linux)" | yes |
-| Task Scheduler | `WSLg Helper` (at logon, your user, not elevated) | yes |
+| Task Scheduler | `WSLg Helper` (at logon + every 2 min: runs whenever WSL runs, a no-op while WSL is down, exits when WSL stops; your user, not elevated) (FIX-019) | yes |
 | `%LOCALAPPDATA%\Programs\WslgHelper` | helper script, config, log | yes |
 | `%USERPROFILE%\.wslgconfig` | `WESTON_RDPRAIL_SHELL_LOCAL_MOVE=true` | yes |
 | `%LOCALAPPDATA%\Programs\DevControl` | Dev Control app | yes (settings backed up) |

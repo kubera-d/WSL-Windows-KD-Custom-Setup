@@ -68,6 +68,8 @@ Write-Step 'Linux side'
 if ($Distro -and (Read-YesNo "Remove the code-linux launchers and desktop entries from '$Distro'?")) {
     $linuxDir = ConvertTo-LinuxPath $Distro (Join-Path $Root 'linux')
     & wsl.exe -d $Distro --exec sh "$linuxDir/setup-linux.sh" uninstall-user
+    # journald drop-in off, chrony back on (only if install disabled it)
+    & wsl.exe -d $Distro -u root --exec sh "$linuxDir/setup-linux.sh" uninstall-root
 }
 
 if (Test-Path $StateFile) { Remove-Item $StateDir -Recurse -Force }

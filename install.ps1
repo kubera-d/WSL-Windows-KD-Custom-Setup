@@ -56,6 +56,10 @@ if (Read-YesNo 'Set up the Linux side?') {
     Write-Note 'Installing packages as root (apt; this can take a few minutes the first time)...'
     & wsl.exe -d $Distro -u root --exec sh "$linuxDir/setup-linux.sh" packages
     if ($LASTEXITCODE -ne 0) { throw 'Linux package setup failed (see output above).' }
+    & wsl.exe -d $Distro -u root --exec sh "$linuxDir/setup-linux.sh" journal
+    if ($LASTEXITCODE -ne 0) { throw 'Linux journal setup failed (see output above).' }
+    & wsl.exe -d $Distro -u root --exec sh "$linuxDir/setup-linux.sh" earlyoom
+    if ($LASTEXITCODE -ne 0) { throw 'earlyoom setup failed (see output above).' }
     & wsl.exe -d $Distro --exec sh "$linuxDir/setup-linux.sh" user
     if ($LASTEXITCODE -ne 0) { throw 'Linux user setup failed (see output above).' }
     $state.installed += 'linux'
@@ -119,11 +123,14 @@ if (Read-YesNo 'Install the WSLg Helper?') {
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $HelperTask -Force `
-        -Description "WSLg fixes: monitor layout resync after sleep, clipboard images as PNG for Linux apps. ($SetupName)" `
-        -Action $action -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $me) -Settings $settings `
+        -Description "WSLg fixes: monitors, clipboard, keep-alive, window rescue. Runs while WSL runs. ($SetupName)" `
+        -Action $action -Settings $settings -Trigger (Get-HelperTriggers $me) `
         -Principal (New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited) | Out-Null
+    # At logon and every 2 minutes (FIX-019): the helper must run whenever WSL runs, not only when Dev Control
+    # booted WSL. A run while the helper is already up is skipped (IgnoreNew + its mutex); a run while WSL is
+    # down exits at once without touching WSL (FIX-010).
     Start-ScheduledTask -TaskName $HelperTask
-    Write-Ok "Installed to $HelperDir; runs at logon (task '$HelperTask'), started now."
+    Write-Ok "Installed to $HelperDir (task '$HelperTask'). Starts within 2 minutes of WSL starting; exits when WSL stops."
     $state.installed += 'helper'
 }
 

@@ -42,6 +42,10 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
   without it VS Code's `bin/code` waits on a `[y/N]` stdin prompt, the detached launch hangs and the
   self-test fails `VS Code launched: timed out`. Linux VS Code windows CLOSE on WSL shutdown rather than
   disconnect. `"codeFlavor": "windows"` uses Windows VS Code `--remote wsl+<distro>`.
+- `Stop-DcWsl` escalates `--shutdown` > `--shutdown --force`; "down" = no running distro AND no
+  `vmmemWSL`, held for 8 s (something opening `\\wsl.localhost` reboots WSL instantly). It writes
+  `%LOCALAPPDATA%\DevControl\wsl-stopping`, which the WSLg Helper honours (`Start-DcWslBoot` deletes it).
+  Its "WSL did not stop" error makes the UI offer `Stop-DcWslForce` (UAC, `hcsdiag kill`). FIX-010.
 - Every external process from the app goes through `Invoke-DcProcess` / `Start-DcDetached`
   (CreateNoWindow). The app has no console, so a plain `& exe` pops a console window.
 - `.ps1` and `.xaml` files must be ASCII-only (PS 5.1 reads BOM-less files as ANSI). `Deploy.ps1`
@@ -53,8 +57,8 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
 - `modesDir` defaults to `modes` next to the app; `%VARS%` are expanded and relative paths resolve
   against `$script:DcAppDir` (`Resolve-DcAppPath`). Mode matching ignores `#`/`;` comment lines.
 - Project discovery is folder-driven: EVERY directory under `projectsRoot` is listed, whether or not it
-  has a compose file. `projects.json` only adds metadata; a folder with no entry lands in group `New`
-  (rank -1, above everything). Hide noise with the card menu's Hide, not by deleting entries.
+  has a compose file. `projects.json` only adds metadata; a folder with no entry has no group (Ungrouped
+  tab, New badge). Hide noise with the card menu's Hide, not by deleting entries.
   Exception: an entry with `path` is listed from that folder (Linux path, or Windows path via `/mnt/<drive>`);
   every folder path goes through `Get-DcProjectDir`, never `"$root/$Project"`. A Windows-path project opens
   in Windows VS Code locally by default (`Get-DcProjectFlavor`).
@@ -114,8 +118,8 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
 - Path: `tests/Run-SelfTest.ps1`
 - Purpose: launches the installed app with `-SelfTest` (timeout 15 min), prints PASS/FAIL lines from
   `%LOCALAPPDATA%\DevControl\selftest.log`; exit code = failures. The test clicks every button via UI
-  Automation (project Run/Stop/Restart, nested container/tool Stop, pinned panel, tray, arrangement
-  menus, drag/drop), answers confirms (always No for Stop WSL / mode switch / Quit VS Code), checks
+  Automation (project Run/Stop/Restart, nested container/tool Stop, search, tray, group picker, tabs,
+  tab drops, Add-projects checklist logic), answers confirms (always No for Stop WSL / mode switch / Quit VS Code), checks
   classification (worktree, compose:false, compose-name clash, services subset, hidden, New) and the
   compose guard, simulates "WSL stopped" via `DEVCONTROL_FAKE_STOPPED=1` and asserts no Linux calls
   from its own PID.
@@ -138,8 +142,11 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
 - `src/DevControl.ps1` - UI wiring, runspace-pool job runner (`Start-Bg` / `On-Tick`), lifecycle
   deferral, tray, project Run/Stop/Restart/code sequence runner, compose policy (`Get-ComposePolicy`), grouping
 - `src/MainWindow.xaml` - layout/styles; item-template buttons use `Uid` = action
-  (run/stop/restart/open/code/child), `Tag` = project name or `c:<id>` / `t:<slug>/<tool>`; project list
-  grouped via ListCollectionView + Expander GroupStyle
+  (run/stop/restart/open/code/codedef/codewin/group/menu/toggle/child), `Tag` = project name or `c:<id>` / `t:<slug>/<tool>`;
+  flat list (Show-Projects filters by tab + search, Sort-Rows: pinned, then recency or name). View tabs are
+  RadioButtons built in code (`Update-Tabs`, `Tag` = all / running / g:<group> / ungrouped / hidden / newgroup);
+  dropping a row on one runs `Invoke-TabDrop`. A list rebuild is skipped while `$script:Dragging`.
+- `src/GroupMembers.xaml` - Add projects checklist (`Show-GroupMembers` > `Set-GroupMembers`); `src/EditProject.xaml` - Edit details
 - `src/SelfTest.ps1` - the `-SelfTest` driver (fixtures, steps, cleanup)
 - `modes/*.wslconfig` - example modes, copied to `<install>\modes` only when missing
 - Runtime logs: `%LOCALAPPDATA%\DevControl\app.log`, `wsl-calls.log`, `selftest.log`

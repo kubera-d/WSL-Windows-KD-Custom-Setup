@@ -101,9 +101,25 @@ function Test-Setup([string]$Distro) {
     if ($script:WslExit -eq 0) { Add-Row 'Mouse offset / glitches (code-linux flags)' 'OK' '~/.local/bin/code-linux' }
     else { Add-Row 'Mouse offset / glitches (code-linux flags)' 'MISSING' 'rerun step 1' }
 
+    Invoke-Wsl $Distro @('test', '-f', '/etc/systemd/journald.conf.d/50-wsl-windows-kd-custom-setup.conf') | Out-Null
+    if ($script:WslExit -eq 0) { Add-Row 'Linux log kept across restarts' 'OK' 'journald drop-in, chrony off' }
+    else { Add-Row 'Linux log kept across restarts' 'MISSING' 'rerun step 1' }
+
     $pk = Invoke-Wsl $Distro @('sh', '-c', 'for p in code wl-clipboard xclip sox libsox-fmt-pulse pulseaudio-utils fonts-noto-color-emoji fonts-noto-core xdg-utils; do dpkg -s $p >/dev/null 2>&1 || echo $p; done')
     if (-not $pk) { Add-Row 'Linux packages (VS Code, clipboard, voice, fonts, xdg)' 'OK' 'all installed' }
     else { Add-Row 'Linux packages (VS Code, clipboard, voice, fonts, xdg)' 'MISSING' (($pk -split "\s+") -join ' ') }
+
+    Invoke-Wsl $Distro @('systemctl', 'is-active', '--quiet', 'earlyoom') | Out-Null
+    if ($script:WslExit -eq 0) { Add-Row 'Runaway process ends before WSL freezes' 'OK' 'earlyoom active' }
+    else { Add-Row 'Runaway process ends before WSL freezes' 'MISSING' 'rerun step 1' }
+
+    $sw = Invoke-Wsl $Distro @('cat', '/proc/sys/vm/swappiness')
+    if ("$sw".Trim() -eq '10') { Add-Row 'VS Code kept in RAM (no swap stalls)' 'OK' 'vm.swappiness = 10' }
+    else { Add-Row 'VS Code kept in RAM (no swap stalls)' 'MISSING' "swappiness $("$sw".Trim()); rerun step 1" }
+
+    Invoke-Wsl $Distro @('grep', '-qE', ' Windows \(C:\)$', "$linuxHome/.config/gtk-3.0/bookmarks") | Out-Null
+    if ($script:WslExit -eq 0) { Add-Row 'Windows drive in Linux file dialogs' 'OK' '~/.config/gtk-3.0/bookmarks' }
+    else { Add-Row 'Windows drive in Linux file dialogs' 'MISSING' 'rerun step 1' }
 
     $lnk = Join-Path $script:StartMenu 'VS Code (Linux).lnk'
     $rk = "HKCU:\Software\Classes\Directory\shell\$script:RightClickKey\command"
@@ -112,7 +128,7 @@ function Test-Setup([string]$Distro) {
 
     $task = Get-ScheduledTask -TaskName $script:HelperTask -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq 'Running') { Add-Row 'Clicks after sleep (monitor resync)' 'OK' "task '$($script:HelperTask)' running" }
-    elseif ($task) { Add-Row 'Clicks after sleep (monitor resync)' 'PENDING' "task is $($task.State); starts at next logon" }
+    elseif ($task) { Add-Row 'Clicks after sleep (monitor resync)' 'OK' "task registered; Dev Control starts it with WSL" }
     else { Add-Row 'Clicks after sleep (monitor resync)' 'MISSING' 'rerun step 3' }
 
     Invoke-Wsl $Distro @('sh', '-c', 'command -v wl-copy') | Out-Null
@@ -133,6 +149,15 @@ function Test-Setup([string]$Distro) {
         Write-Host ('   {0,-8} {1,-55} {2}' -f $r.State, $r.Fix, $r.Detail) -ForegroundColor $color
     }
     @($rows | Where-Object State -eq 'MISSING').Count
+}
+
+# WSLg Helper task triggers (FIX-019): at logon, and every 2 minutes indefinitely, so the helper is running
+# whenever WSL is - however WSL was started. Each run is cheap: skipped if the helper is already up, an
+# immediate exit if WSL is down (it never boots WSL).
+function Get-HelperTriggers([string]$User) {
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User $User
+    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Minutes 2)
+    @($logon, $every)
 }
 
 # Stop any running copy of a background script by its file name (matched on the command line).
