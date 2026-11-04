@@ -58,8 +58,24 @@ One window: a header bar (WSL and VS Code), a search bar, tabs, and the project 
     both start WSL first if needed).
   - Containers and tools of no listed project appear in an "Other containers and tools" row (All and
     Running tabs).
+- **Fix windows** (header, while WSL runs): a Linux window vanished (not on screen, not in the taskbar) or
+  clicks land in the wrong place after a dock / monitor / sleep change. Restores minimized Linux windows,
+  moves off-screen ones onto the main screen and reconnects WSLg (WSLg Helper `-Repair`). If a Linux VS Code
+  window is still missing, it offers a clean VS Code restart that reopens all its windows. It refuses to
+  reconnect while the microphone is in use (dictation, a call): that crashes WSLg (FIX-022, FIX-023).
+- **Fix WSL** (header, while WSL runs): pasting a screenshot into Linux VS Code does nothing, `explorer.exe` /
+  `clip.exe` from Linux hang, or this app's status and project list time out. Ends the stuck WSL `Relay`
+  processes that make new WSL calls hang (WSLg Helper `-Reap`; the helper also does this every 5 min). Open
+  windows, VS Code and containers are not touched. Works even while another operation is busy. If WSL does not
+  answer at all, the log gives a command for an already-open Linux terminal (FIX-030).
+- **WSL network check**: after every start, and in every status refresh, Dev Control checks that Linux has a
+  default route. Mirrored networking sometimes fails at startup and WSL silently runs with no network (Claude
+  Code chats / login / Remote Control, git and apt all fail; FIX-028). Dev Control then offers, once per WSL
+  run, to repair it: stop WSL, remove stale `FSE Switch` HNS networks and restart the Host Network Service
+  (UAC prompt), start WSL again. Tray menu **Fix WSL network** runs the same repair by hand.
 - **Tray icon**: Open, Run project (pinned projects, then the most recently used - 8 at most), Start WSL
-  (per mode), Stop WSL, Open Linux VS Code, Open Windows VS Code, Quit Linux VS Code, Exit. Minimizing
+  (per mode), Stop WSL, Open Linux VS Code, Open Windows VS Code, Quit Linux VS Code, Fix Linux windows, Fix WSL,
+  Fix WSL network, Exit. Minimizing
   hides to the tray.
 
 ### Groups (saved, restored every time)

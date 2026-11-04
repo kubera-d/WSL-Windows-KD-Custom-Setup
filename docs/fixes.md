@@ -215,3 +215,169 @@ fixes are in [`devcontrol/docs/fixes.md`](../devcontrol/docs/fixes.md).)
   waits 15 s and - if no VS Code process is left - runs `code-linux` with no folder, which restores every window
   of the last session (tabs, Claude panels). Log: "WSLg display server crashed and restarted - reopened Linux
   VS Code". Conversations that were mid-reply need "continue".
+
+### FIX-021 - Mouse offset in Linux VS Code after docking; the helper did nothing
+- **Symptom:** after plugging into the dock, clicks land away from the pointer in Linux VS Code.
+  `wslg-helper -Status` shows more Windows monitors than WSLg ones, and the log has no restart for it.
+- **Cause:** the helper's timers (restart cooldown, next monitor check, keep-alive, caches) used the wall
+  clock. Booting Kubuntu (dual boot) left the hardware clock in UTC, so Windows came back 4 h ahead; when NTP
+  corrected it, the last msrdc restart lay 4 h in the "future" and every cooldown blocked restarts for 4 h.
+- **Fix:** timers use a monotonic clock (`Get-Now`: a Stopwatch added to the start time); only log lines and
+  file-time comparisons use `Get-Date`. Root of the clock jumps: Windows now keeps the hardware clock in UTC
+  like Linux (`HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation` `RealTimeIsUniversal` = 1, set by
+  hand on dual-boot machines; not done by the installer).
+
+### FIX-022 - Linux VS Code window vanished (not on screen, not in the taskbar) - one-click fix
+- **Symptom:** Linux VS Code keeps running in WSL, but its window is gone from every view; `wslg-helper -Status`
+  lists no minimized or off-screen Linux window. The helper log shows the window was minimized
+  (`NOT restarting msrdc while Linux window(s) are minimized`) before a sleep/wake or dock change.
+- **Cause:** WSLg does not re-send a minimized window when msrdc reconnects (FIX-012). WSLGd itself relaunches
+  msrdc on sleep/wake/display changes, so a window that was minimized at that moment is lost. Opening its folder
+  again (`code-linux <dir>`) only focuses the lost window; nothing on either side brings it back.
+- **Fix:** Dev Control's **Fix windows** button (header and tray): `wslg-helper.ps1 -Repair` restores minimized
+  Linux windows first (so they survive), moves off-screen ones to the main screen, restarts msrdc (layout and
+  windows re-sent; also fixes clicks landing in the wrong place) and counts the Linux VS Code windows on screen.
+  If one is still missing it offers a clean VS Code restart (`Restart-DcVSCode`: SIGTERM, then plain
+  `code-linux`, which reopens every window with its editors).
+- **Caveat (cause found in FIX-023 - a restart while the mic is open; now guarded):** a forced msrdc restart crashed Weston (`unable to checkDescriptor`, then
+  `terminated with signal 6`; seen once in ~8 restarts). Every Linux window closes; the FIX-020 recovery reopens
+  Linux VS Code ~20 s later. Text typed or dictated but not sent in Claude Code is lost - use the button when
+  you are not mid-prompt.
+
+### FIX-023 - Linux VS Code vanishes as soon as you start dictating; then the microphone is dead
+- **Symptom:** start dictating in Claude Code (Linux VS Code) right after coming back from a Windows app (a Teams
+  call); every Linux window disappears, VS Code comes back ~20 s later without the dictated text, and the mic
+  does nothing for ~2 minutes (`pactl info`: Connection refused).
+- **Cause:** a WSLg bug - a msrdc disconnect while the microphone channel is open aborts Weston and PulseAudio
+  (`/mnt/wslg/stderr.log`: `rdpaudioin.c:575: rdp_audio_in_destroy: Assertion ... IsOpen ... failed`,
+  `module-rdp-source.c:257: thread_func: Assertion 'false' failed`, both `terminated with signal 6`). PulseAudio
+  then needs ~135 s to come back (it waits for X). The disconnect came from the helper: the FIX-017 wake rule took
+  "no input to Linux windows for 64 min" (the call) as a screen-off and restarted msrdc 10 s after the first
+  click back - exactly when dictation started. The same crash is the "caveat" of FIX-022.
+- **Fix:** (a) no msrdc restart (automatic or Fix windows) while the mic is in use: `Test-MicInUse` asks
+  `pactl` whether `RDPSource` is anything but SUSPENDED or something records (audio server unreachable = in
+  use); the restart waits and is retried. (b) the wake rule fires only if the session was locked or the PC
+  slept during the WSLg idle (`LogonUI` running, or a > 60 s gap between helper passes); otherwise it logs
+  "idle ... while Windows was in use - no restart".
+
+### FIX-024 - Linux VS Code disappears for ~10 s a few seconds after every wake
+- **Symptom:** after waking the PC, Linux VS Code is there and working, then vanishes for about 10 seconds and
+  comes back.
+- **Cause:** the FIX-017 wake rule. On this laptop (Modern Standby) msrdc keeps its RDP connection through sleep -
+  weston.log shows the same `peer_ctx` before and after `rdp_rail_wake_handler`, no `xf_peer_adjust_monitor_layout`
+  until the helper's restart - so the helper's restart 10 s after the wake was the only reconnect, and every
+  reconnect takes all Linux windows away for ~10 s. The stale-window problem it prevented (FIX-017 a) was seen once.
+- **Fix:** the wake restart is off by default (log: `woke after N min away - windows left as they are`). If windows
+  are stale after a wake, Dev Control's Fix windows does the same restart on demand. `helper-config.json`
+  `"wakeRestart": true` turns the automatic one back on (install keeps that setting).
+- **Also (review):** a `Client: DisplayLayoutChange` in the weston.log history read at helper start no longer counts as
+  a live change (it restarted msrdc, blinking every window, whenever the helper started after one); `-Status`
+  counts each keep-alive once (a keep-alive is a wsl.exe with a wsl.exe child).
+
+### FIX-025 - Linux VS Code vanishes when undocking (helper killed a reconnecting msrdc)
+- **Symptom:** undock; Linux VS Code keeps running but its window is gone for good (Fix windows' reconnect does
+  not bring it back; its VS Code restart does).
+- **Cause:** weston.log `09:10:30 Client: DisplayLayoutChange: monitor count:0x1`; WSLGd relaunched msrdc itself
+  3 s later (stderr.log `exited with status 0`); 14 s later the helper, still acting on the live change (FIX-009),
+  killed that NEW msrdc while it was re-creating windows: `rdp_rail_destroy_window: update is still pending in
+  client side (windowId:0x1)`. The window was never re-sent.
+- **Fix:** a new msrdc process counts as the fresh connection that clears a pending live change (log: `msrdc
+  reconnected by itself after the screen change - no restart needed`), and no restart - automatic or Fix windows -
+  hits a msrdc younger than 45 s (`$YoungMsrdcSec`; Fix windows waits instead).
+
+### FIX-026 - WSL stops by itself under open Linux VS Code windows (everything "crashes")
+- **Symptom:** every Linux window disappears at once; `wsl --list --running` shows nothing; helper log `WSL stopped -
+  exiting`; Dev Control made no stop call (`wsl-calls.log` has only QUERY lines).
+- **Cause:** the previous boot's journal ends mid-stream (no shutdown sequence, memory fine, earlyoom idle) at 00:01:07;
+  the VM's network was torn down 49 s later (Hyper-V-VmSwitch), i.e. WSL's own idle shutdown: the distro is ended soon
+  after its last wsl.exe session closes, and WSLg windows are not sessions. The keep-alive session (FIX-017) had gone,
+  and the helper only checked for it every 30 s - longer than WSL waits.
+- **Fix:** (a) `.wslconfig` `[general] instanceIdleTimeout=-1` (WSL 2.7 `wslservice.exe` knows
+  `general.instanceIdleTimeout`; -1 = never idle-stop the distro; takes effect at the next WSL start). Dev Control's
+  example modes carry it; installed modes and the live `.wslconfig` need it too, because a mode switch copies its file
+  over `.wslconfig`. (b) the helper checks the keep-alive every 5 s.
+- **Recovery:** boot WSL, start the helper task, run `code-linux` with no folder (reopens every window; Claude tabs come
+  back, a reply that was in progress needs "continue").
+
+### FIX-027 - Dictation and Claude Code stop working; Stop WSL then "FAILED: Timed out"
+- **Symptom:** open Linux VS Code windows keep working, but nothing new starts: Claude Code will not open, dictation
+  records nothing, `wsl.exe -e <anything>` never returns. Dev Control's Stop WSL ends in `FAILED: Timed out after
+  20s: wsl.exe --list --running --quiet` and offers no force stop.
+- **Cause:** a Linux kernel hang, not memory (11.7 of 16 GB free, no pressure): load average flat at 23 with 15
+  processes in D state - `synchronize_rcu_expedited` / `exp_funnel_lock` (RCU grace periods no longer complete),
+  systemd stuck in `cgroup_kn_lock_live`, and Docker health-check `runc` calls (portfolio-analyst containers) piling
+  up every few seconds. Every new session needs a cgroup, so nothing can start. Read from Windows over
+  `\wsl.localhost\<distro>\proc\<pid>\stat` + `wchan` (9p still answers). Stop WSL's down check (`--list
+  --running`) then timed out and that exception escaped `Stop-DcWsl`, so the UI never saw "WSL did not stop".
+- **Fix:** `Test-DcWslDown` treats a timed-out `--list` as "not down" and notes the hang; `Stop-DcWsl` then skips the
+  second shutdown and throws "WSL did not stop", so the UI offers the force stop (UAC, `hcsdiag kill`) at once.
+- **Recovery:** force stop, start WSL, start the helper task, `code-linux` with no folder.
+- **Open:** the hang's trigger. If it recurs, check which containers' health checks are piling up, and consider
+  `kernelCommandLine = rcupdate.rcu_normal=1` (no expedited RCU grace periods) in `.wslconfig`.
+
+### FIX-028 - Claude Code login: "getaddrinfo EAI_AGAIN platform.claude.com" - WSL has no network
+- **Symptom:** Claude Code in Linux VS Code shows the login screen with `getaddrinfo EAI_AGAIN`; in Linux there is no
+  `eth*` interface and no default route, `/etc/resolv.conf -> /mnt/wsl/resolv.conf` is missing. Windows is online.
+  Starting WSL from a terminal prints `CreateInstance/CreateVm/ConfigureNetworking/0x8007054f` and
+  `Failed to configure network (networkingMode Mirrored), falling back to networkingMode None`.
+- **Cause:** stale mirrored-mode HNS networks (`hnsdiag list networks`, admin: `FSE Switch (Wi-Fi)`, `(Ethernet)`,
+  ... Type Mirrored) still registered with WSL stopped - their ids match the NICs torn down when the hung VM was
+  force-stopped (FIX-027, `hcsdiag kill`). WSL cannot create its networks over them. Restarting the `hns` service and
+  disabling an unused TAP-Windows adapter did not help.
+- **Fix:** with WSL stopped, `hnsdiag delete networks <id>` for each `FSE Switch*` network of Type Mirrored (admin);
+  WSL recreates them on start. Dev Control's force stop now does this right after killing the VM.
+- **Recurrence (Oct 23):** same error on every start after a WSL run that left no Linux journal (likely an unclean
+  stop). Deleting the `FSE Switch*` networks did not help, nor did a Windows reboot (WSL starts right at logon).
+  What worked (admin): `wsl --shutdown`, wait for `vmmemWSL` to exit, `Stop-Service hns -Force`, `Start-Service hns`,
+  then start WSL. There was no `%ProgramData%\Microsoft\Windows\HNS\HNS.data` to reset on this build. Not
+  established which part mattered: the HNS restart with WSL fully down, or not starting WSL at logon right away.
+- **Recurrence (Nov 4):** after a hung WSL (all `wsl.exe` calls timing out), Fix WSL, Stop WSL and a mode-switch
+  restart (`wsl --shutdown`, boot 11 s later), Linux again had no interfaces (only `lo` / docker bridges), no
+  default route and no `/etc/resolv.conf`; the previous boot 5 min earlier had `loopback0` / `eth2`. Visible only
+  as Claude Code chats not loading and Remote Control failing - nothing reported the missing network.
+- **Detection (Dev Control):** `Start-DcWslBoot` waits up to 15 s for a default route and adds
+  `WARNING: WSL started WITHOUT A NETWORK`; `Get-DcRuntime` reports it (`N` line), so a WSL started by anything
+  else is caught too. The app then offers, once per WSL run, `Repair-DcWslNetwork`: stop WSL, delete the stale
+  `FSE Switch` mirrored networks, `Stop-Service hns -Force` / `Start-Service hns` (elevated), start WSL again.
+  Tray menu: Fix WSL network. If it still has no network after that, restart Windows.
+
+### FIX-029 - Stop WSL works, then WSL starts again by itself ~10 s later
+- **Symptom:** Dev Control logs `WSL shut down.` and, 8-10 s later, `WSL is running.` - with no BOOT call in
+  `wsl-calls.log` and the WSLg Helper still exited. Happened on every Stop WSL that day.
+- **Cause:** Explorer windows open on Linux folders (`\\wsl.localhost\<distro>\home\...`). Once the share goes away,
+  Explorer refreshes those windows and the 9p redirector boots the distro (as in FIX-010). No `wsl.exe` is started:
+  the process list showed only `vmwp.exe` / `vmmemWSL` / `wslhost.exe` appearing, and `Shell.Application.Windows()`
+  listed four windows with `LocationURL` `file://wsl.localhost/...`. The 8 s stays-down check had already passed.
+- **Fix:** `Stop-DcWsl` closes every Explorer window whose location is under `\\wsl.localhost` or `\\wsl$`
+  (`Close-DcLinuxExplorerWindows`) before each shutdown attempt; the Stop WSL confirmation says how many will close.
+  Also covers mode-switch restarts (they go through `Stop-DcWsl`).
+- **Not covered:** a mapped drive letter pointing at `\\wsl.localhost`, and other apps holding Linux files open
+  (an editor or image viewer with a `\\wsl.localhost` file) can still boot WSL after a stop.
+
+### FIX-030 - Screenshot paste, explorer.exe and clip.exe stop working; wsl.exe hangs
+- **Symptom:** pasting a Windows screenshot into Linux VS Code does nothing (helper log `wl-copy failed`); in Linux,
+  `explorer.exe .` and `... | clip.exe` do nothing; Dev Control's project list and status time out. Open Linux
+  windows keep working. From Windows, `wsl.exe -d <distro> -- true` takes ~30 s or fails after ~85 s with
+  `Wsl/Service/0x8007274c` (connection timed out) - also for `wsl --system`. Linux itself is fine (low load, memory
+  free, `binfmt_misc/WSLInterop` enabled).
+- **Cause:** dozens of leaked `Relay` processes in the distro (read over `\\wsl.localhost\<distro>\proc`): root,
+  named exactly `Relay`, parent PID 1, no children, sleeping in `poll`. Each start time matched a Dev Control Linux
+  call (`wsl-calls.log`) that had returned normally on the Windows side; they came in bursts (one per 30 s poll) after
+  a wake. With ~70 of them, every new WSL session - Windows-to-Linux and Linux-to-Windows interop alike - first slowed
+  down, then timed out. Live relays are named `Relay(<pid>)` or have a child. WSL 2.7.14 bug; trigger not established.
+  The slowdown is not a strict function of the count: with ~80 leaked relays, calls alternated between ~0.3 s and
+  timing out within a minute. The relays ignore SIGTERM (`SigIgn` includes 15), so `kill` alone does nothing.
+- **Fix:** the helper ends them every 5 min (`Invoke-RelayReap`: `wsl -u root`, `kill -KILL`, only exactly-`Relay`,
+  parent 1, childless, older than 5 min) without waiting on the call, and logs how many are actually gone. The
+  screenshot hand-off now logs a `wsl.exe did not answer` timeout separately from a wl-copy failure. Dev
+  Control's **Fix WSL** button (header and tray) runs the same cleanup on demand (helper `-Reap`, relays older
+  than 60 s); it stays enabled while the app is busy, since a busy app may be stuck on exactly such a call.
+- **Recovery when already hung:** in a Linux terminal (one that is already open still works), as root: `kill -KILL`
+  the processes matching the rule above. If even that does not bring `wsl.exe` back, restart WSL.
+- **Not the whole cause (Oct 27-28):** with the cleanup running, leaked relays stayed at 1-10, yet new sessions
+  still hung for minutes at a time (eight `image not handed to Linux - wsl.exe did not answer` and many cleanup
+  calls failing with exit -1 between 23:37 and 00:13). The relays add to the problem; something else in WSL's
+  session setup (`Wsl/Service/0x8007274c`) hangs too. When Fix WSL cannot reach WSL it counts the relays over 9p
+  and only suggests the terminal cleanup when there are 20 or more; otherwise restarting WSL is the remedy.
+- **Open:** what else stalls WSL session creation; why Dev Control's polls leak relays; if they keep leaking, try other ways of starting wsl.exe there
+  (stdin not redirected or closed later) and count the leaks.

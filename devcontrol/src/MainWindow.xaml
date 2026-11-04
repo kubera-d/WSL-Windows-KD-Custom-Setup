@@ -282,6 +282,20 @@
             <TextBlock x:Name="CodeText" Text="" FontSize="12" Foreground="{StaticResource Muted}" Margin="6,0,0,0" VerticalAlignment="Center"/>
           </StackPanel>
         </Button>
+        <Button x:Name="FixWinBtn" Style="{StaticResource BtnGhost}" Padding="8,5" Margin="0,0,2,0"
+                ToolTip="Fix Linux windows: brings back Linux windows that vanished (minimized or off-screen) and fixes clicks landing in the wrong place after a dock / monitor / sleep change. If a Linux VS Code window is still missing, offers a clean VS Code restart that reopens all its windows.">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xE90F;" FontFamily="Segoe MDL2 Assets" FontSize="12" Foreground="#60A5FA" VerticalAlignment="Center"/>
+            <TextBlock Text="Fix windows" FontSize="12" Foreground="{StaticResource Muted}" Margin="6,0,0,0" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
+        <Button x:Name="FixWslBtn" Style="{StaticResource BtnGhost}" Padding="8,5" Margin="0,0,2,0"
+                ToolTip="Fix WSL: ends stuck WSL relay processes that make new WSL calls hang - pasting a screenshot into Linux VS Code, explorer.exe / clip.exe from Linux, and this app's status. Open windows, VS Code and containers are not touched.">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="&#xE895;" FontFamily="Segoe MDL2 Assets" FontSize="12" Foreground="#34D399" VerticalAlignment="Center"/>
+            <TextBlock Text="Fix WSL" FontSize="12" Foreground="{StaticResource Muted}" Margin="6,0,0,0" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
         <Button x:Name="MoreBtn" Style="{StaticResource Icon}" Content="&#xE712;" Margin="4,0,0,0"
                 ToolTip="Refresh, stop all containers, projects.json, activity log"/>
       </StackPanel>

@@ -242,9 +242,26 @@ function Wait-DcWslState([bool]$Running, [int]$TimeoutSec) {
 $script:DcStopMarker = Join-Path $script:DcDataDir 'wsl-stopping'
 function Set-DcStopMarker { try { [IO.File]::WriteAllText($script:DcStopMarker, (Get-Date).ToString('o')) } catch { } }
 
+# Explorer windows showing a Linux folder (\\wsl.localhost\... or \\wsl$\...): seconds after wsl --shutdown
+# Explorer refreshes them and that boots the distro straight back up - no wsl.exe involved (FIX-029).
+function Get-DcLinuxExplorerWindows {
+    try { @((New-Object -ComObject Shell.Application).Windows() | Where-Object { "$($_.LocationURL)" -match '^file://wsl(\.localhost|\$)/' }) } catch { @() }
+}
+function Close-DcLinuxExplorerWindows {
+    $n = 0
+    foreach ($w in @(Get-DcLinuxExplorerWindows)) { try { $w.Quit(); $n++ } catch { } }
+    $n
+}
+
 # Down = no distro listed as running AND the VM process is gone (that is what frees memory/CPU).
+# A hung Linux kernel makes even `wsl --list --running` time out: that is "not down" (and noted in
+# $script:DcWslHung), not an error - otherwise Stop WSL failed without offering the force stop (FIX-026).
+$script:DcWslHung = $false
 function Test-DcWslDown {
-    -not (Test-DcWslRunning) -and -not (Get-Process -Name 'vmmemWSL' -ErrorAction SilentlyContinue)
+    if (-not (Get-Process -Name 'vmmemWSL' -ErrorAction SilentlyContinue)) {
+        try { return -not (Test-DcWslRunning) } catch { $script:DcWslHung = $true; return $false }
+    }
+    $false
 }
 
 function Wait-DcWslDown([int]$TimeoutSec) {
@@ -281,8 +298,15 @@ function Get-DcWslClients {
 # 'WSL did not stop...' otherwise - the UI then offers Stop-DcWslForce.
 function Stop-DcWsl {
     $notes = @()
+    $closed = 0
+    $script:DcWslHung = $false
     foreach ($a in @('--shutdown', '--shutdown --force')) {
+        # WSL no longer answers at all (hung kernel): a second shutdown cannot help either - go straight
+        # to the force stop the UI offers on 'WSL did not stop'.
+        if ($script:DcWslHung) { $notes += 'WSL is not responding (wsl.exe --list timed out)'; break }
         Set-DcStopMarker
+        $n = Close-DcLinuxExplorerWindows
+        if ($n) { $closed += $n; Write-DcLog "Closed $n Explorer window(s) showing Linux folders (they would start WSL again)" }
         Write-DcCallLog 'SHUT' $a
         try {
             $r = Invoke-DcProcess 'wsl.exe' $a 45
@@ -291,15 +315,76 @@ function Stop-DcWsl {
         if (Wait-DcWslDown 20) {
             if (Test-DcWslStaysDown 8) {
                 Write-DcLog "WSL shut down (wsl $a)"
-                return $(if ($a -eq '--shutdown') { 'WSL shut down.' } else { 'WSL shut down (forced).' })
+                $msg = $(if ($a -eq '--shutdown') { 'WSL shut down.' } else { 'WSL shut down (forced).' })
+                if ($closed) { $msg += " Closed $closed Explorer window(s) on Linux folders." }
+                return $msg
             }
             $notes += "WSL started again right after wsl $a"
-            Write-DcLog ("WSL started again right after wsl $a. WSL clients now: " + ((Get-DcWslClients) -join '; '))
+            Write-DcLog ("WSL started again right after wsl $a. WSL clients now: " + ((Get-DcWslClients) -join '; ') +
+                "; Explorer windows on Linux folders: $(@(Get-DcLinuxExplorerWindows).Count)")
         } else {
             $notes += "still running 20s after wsl $a"
         }
     }
     throw ('WSL did not stop: ' + ($notes -join '; '))
+}
+
+# Elevated-script fragment (starts with a blank line, see CLAUDE.md): a VM that did not stop cleanly leaves its
+# mirrored-mode HNS networks ("FSE Switch (<adapter>)", Type Mirrored) behind; the next start then fails
+# "ConfigureNetworking/0x8007054f ... falling back to networkingMode None" - no network in Linux (FIX-028).
+# WSL recreates them on start, so remove only those.
+$script:DcHnsCleanup = @'
+
+$cur = $null; $fse = $null
+foreach ($l in (& hnsdiag.exe list networks 2>&1)) {
+    if ("$l" -match '^Network : ([0-9A-Fa-f-]{36})') { $cur = $Matches[1] }
+    elseif ($cur -and "$l" -match '^\s+Name\s+: FSE Switch') { $fse = $cur }
+    elseif ($cur -and "$l" -match '^\s+Type\s+: Mirrored' -and $fse -eq $cur) { & hnsdiag.exe delete networks $cur | Out-Null; "deleted stale HNS network $cur"; $cur = $null }
+}
+'@
+
+# networkingMode from .wslconfig ([wsl2] networkingMode=...), 'nat' when unset. Comment lines are ignored.
+function Get-DcNetworkingMode {
+    $s = Get-DcSettings
+    $mode = 'nat'
+    if (Test-Path -LiteralPath $s.wslConfigPath) {
+        foreach ($l in (Get-Content -LiteralPath $s.wslConfigPath -ErrorAction SilentlyContinue)) {
+            if ($l -match '^\s*networkingMode\s*=\s*([A-Za-z]+)') { $mode = $Matches[1].ToLowerInvariant() }
+        }
+    }
+    $mode
+}
+
+# Shell test: Linux has a default route (IPv4 or IPv6). Without one, nothing in Linux reaches the internet -
+# Claude Code shows getaddrinfo EAI_AGAIN / chats do not load, Remote Control cannot connect (FIX-028).
+$script:DcNetTest = '{ ip -4 route show default; ip -6 route show default; } 2>/dev/null | grep -q .'
+$script:DcNoNetworkMsg = 'WARNING: WSL started WITHOUT A NETWORK (no default route in Linux; mirrored networking failed - FIX-028).'
+
+# Repairs FIX-028 with WSL fully down (the caller stops it): delete stale FSE Switch networks, then restart the
+# Host Network Service - the step that worked when the deletion alone did not. Needs admin (UAC).
+function Repair-DcWslNetwork {
+    if (-not (Test-DcWslDown)) { throw 'WSL is still running - stop it before repairing its network.' }
+    Set-DcStopMarker
+    $script = Join-Path $script:DcDataDir 'repair-wsl-network.ps1'
+    $out = Join-Path $script:DcDataDir 'repair-wsl-network.log'
+    ('$ErrorActionPreference = ''Continue''' + "`r`n" + '& {' + $script:DcHnsCleanup + @'
+
+Stop-Service hns -Force
+Start-Service hns
+"hns: $((Get-Service hns).Status)"
+} *>&1 | Out-File -FilePath $args[0] -Encoding ASCII
+'@) | Set-Content -Path $script -Encoding ASCII
+    Remove-Item -Force -ErrorAction SilentlyContinue $out
+    Write-DcCallLog 'NETFIX' 'hnsdiag delete <stale FSE Switch networks> / restart hns (elevated)'
+    try {
+        $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -PassThru `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$script`" `"$out`""
+    } catch { throw "Network repair cancelled ($($_.Exception.Message))" }
+    if (-not $p.WaitForExit(90000)) { throw 'Network repair did not finish within 90 s.' }
+    $lines = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue | Where-Object { "$_".Trim() })
+    Write-DcLog ('Network repair: ' + ($lines -join '; '))
+    if (-not ($lines -match '^hns: Running$')) { throw ('Host Network Service did not restart: ' + ($lines -join '; ')) }
+    'Reset WSL networking (Host Network Service restarted' + $(if ($lines -match '^deleted') { ", $(@($lines -match '^deleted').Count) stale network(s) removed" } else { '' }) + ').'
 }
 
 # Last resort (asks for admin rights via UAC): end the WSL VM through the Host Compute Service
@@ -315,7 +400,7 @@ Start-Sleep -Seconds 5
 if (Get-Process -Name vmmemWSL -ErrorAction SilentlyContinue) {
     Stop-Process -Name wslservice -Force -ErrorAction SilentlyContinue
 }
-'@ | Set-Content -Path $script -Encoding ASCII
+'@ + $script:DcHnsCleanup | Set-Content -Path $script -Encoding ASCII
     Write-DcCallLog 'FORCE' 'hcsdiag kill <WSL VM> / Stop-Process wslservice (elevated)'
     try {
         $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -PassThru `
@@ -363,6 +448,11 @@ function Start-DcWslBoot {
     # Wait for dockerd (systemd starts it a moment after boot).
     $r = Invoke-DcLinux 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1' 90
     $msgs += if ($r.ExitCode -eq 0) { 'Docker is ready.' } else { 'WARNING: Docker did not respond within 60s.' }
+    # Mirrored networking can fail at boot and fall back to none without telling anyone (FIX-028).
+    if ((Get-DcNetworkingMode) -ne 'none') {
+        $r = Invoke-DcLinux ('for i in $(seq 1 15); do ' + $script:DcNetTest + ' && exit 0; sleep 1; done; exit 1') 40
+        if ($r.ExitCode -ne 0) { $msgs += $script:DcNoNetworkMsg }
+    }
     Write-DcLog ($msgs -join ' ')
     $msgs -join ' '
 }
@@ -570,7 +660,9 @@ function Get-DcProjectFlavor([string]$Project) {
 # the project's default (Get-DcProjectFlavor). Windows VS Code with no project opens a plain LOCAL
 # window (no WSL needed); with a project it opens the Linux folder through Remote - WSL, or a project on
 # a Windows path locally.
-function Open-DcVSCode([string]$Project, [string]$Flavor) {
+# -Restore (Linux, no project): plain `code-linux`, which reopens the last session's windows when VS Code
+# is not running; without it an empty window opens (-n).
+function Open-DcVSCode([string]$Project, [string]$Flavor, [switch]$Restore) {
     $s = Get-DcSettings
     $path = ''
     $winPath = ''
@@ -586,6 +678,7 @@ function Open-DcVSCode([string]$Project, [string]$Flavor) {
         # exit 127 = launcher missing (reported below instead of a silent failure)
         $launch = "[ -x `"`$HOME/.local/bin/code-linux`" ] || exit 127`n"
         $script = if ($path) { $launch + "cd $(ConvertTo-DcBashLiteral $path) && exec `"`$HOME/.local/bin/code-linux`" ." }
+                  elseif ($Restore) { $launch + "cd `"`$HOME`" && exec `"`$HOME/.local/bin/code-linux`"" }
                   else { $launch + "cd `"`$HOME`" && exec `"`$HOME/.local/bin/code-linux`" -n" }
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
         Write-DcCallLog 'CODE' ("linux " + $(if ($path) { $path } else { '-n (no folder)' }))
@@ -608,7 +701,54 @@ function Open-DcVSCode([string]$Project, [string]$Flavor) {
         if ($linux -and $p.ExitCode -eq 127) { throw '~/.local/bin/code-linux was not found in WSL - install it (the repo''s Linux setup does), or use the Windows VS Code button' }
         throw "code exited with $($p.ExitCode)"
     }
-    if ($path) { "Opened $path in VS Code ($label)." } else { "Opened an empty VS Code window ($label)." }
+    if ($path) { "Opened $path in VS Code ($label)." }
+    elseif ($Restore -and $linux) { "Reopened Linux VS Code with its previous windows." }
+    else { "Opened an empty VS Code window ($label)." }
+}
+
+# Fix Linux windows (FIX-022): Linux windows that vanished (minimized or off-screen when WSLg reconnected)
+# or click in the wrong place (stale monitor layout). The WSLg Helper's -Repair does the Win32 work:
+# restore minimized, move off-screen ones, restart msrdc. Returns its messages and how many Linux VS Code
+# windows are on screen afterwards (-1 = unknown).
+function Repair-DcLinuxWindows {
+    $helper = Join-Path $env:LOCALAPPDATA 'Programs\WslgHelper\wslg-helper.ps1'
+    if (-not (Test-Path $helper)) {
+        Get-Process msrdc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Write-DcLog 'Fix Linux windows: WSLg Helper not installed - restarted msrdc only.'
+        return [pscustomobject]@{ Lines = @('Reconnected WSLg (msrdc). Install the WSLg Helper for the full repair.'); CodeWindows = -1 }
+    }
+    $r = Invoke-DcProcess 'powershell.exe' "-NoProfile -STA -ExecutionPolicy Bypass -File `"$helper`" -Repair" 90
+    $lines = @($r.Out -split "`r?`n" | Where-Object { $_.Trim() })
+    $cw = -1
+    foreach ($l in $lines) { if ($l -match '^CODEWINDOWS (-?\d+)') { $cw = [int]$Matches[1] } }
+    $msgs = @($lines | Where-Object { $_ -notmatch '^CODEWINDOWS ' })
+    Write-DcLog ("Fix Linux windows: " + ($msgs -join ' ') + " Linux VS Code windows on screen: $cw")
+    [pscustomobject]@{ Lines = $msgs; CodeWindows = $cw }
+}
+
+# Fix WSL (FIX-030): WSL 2.7 leaks the Linux end of some wsl.exe calls ("Relay" processes); with dozens,
+# new wsl.exe calls slow down and hang, and so do screenshot paste and explorer.exe / clip.exe from Linux.
+# The WSLg Helper ends them every 5 min; its -Reap does it now. Returns its messages and how many it
+# ended (-1 = WSL did not answer).
+function Repair-DcWslRelays {
+    $helper = Join-Path $env:LOCALAPPDATA 'Programs\WslgHelper\wslg-helper.ps1'
+    if (-not (Test-Path $helper)) { throw 'the WSLg Helper is not installed (install.ps1 step 3) - it does the cleanup' }
+    $r = Invoke-DcProcess 'powershell.exe' "-NoProfile -ExecutionPolicy Bypass -File `"$helper`" -Reap" 120
+    $lines = @($r.Out -split "`r?`n" | Where-Object { $_.Trim() })
+    $n = -1
+    foreach ($l in $lines) { if ($l -match '^RELAYS (-?\d+)') { $n = [int]$Matches[1] } }
+    $msgs = @($lines | Where-Object { $_ -notmatch '^RELAYS ' })
+    Write-DcLog ("Fix WSL: " + ($msgs -join ' '))
+    [pscustomobject]@{ Lines = $msgs; Ended = $n }
+}
+
+# A Linux VS Code window WSLg dropped cannot be brought back from either side; a clean quit and a plain
+# start (hot exit) reopens every window with its editors.
+function Restart-DcVSCode {
+    $a = Stop-DcVSCode
+    Start-Sleep -Seconds 2
+    $b = Open-DcVSCode '' 'linux' -Restore
+    "$a $b"
 }
 
 # Linux VS Code processes all report comm 'code'; the ROOTS (parent is not itself a code
@@ -686,7 +826,7 @@ done
 '@ + $script:DcCodeRoots + @'
 
 printf 'V\t%s\n' "$(echo $roots | wc -w)"
-'@
+'@ + "`nif $($script:DcNetTest); then printf 'N\t1\n'; else printf 'N\t0\n'; fi`n"
     $r = Invoke-DcLinux $script 60
     if ($r.ExitCode -ne 0) { throw "docker ps/stats failed: $($r.Err)" }
     $lines = @($r.Out -split "`r?`n")
@@ -719,7 +859,9 @@ printf 'V\t%s\n' "$(echo $roots | wc -w)"
         }
     })
     $vs = @($lines | Where-Object { $_.StartsWith("V`t") } | ForEach-Object { [int]($_.Split("`t")[1]) })
-    [pscustomobject]@{ Containers = $containers; Tools = $tools; VSCode = $(if ($vs.Count) { $vs[0] } else { 0 }) }
+    $net = @($lines | Where-Object { $_.StartsWith("N`t") } | ForEach-Object { $_.Split("`t")[1] -eq '1' })
+    [pscustomobject]@{ Containers = $containers; Tools = $tools; VSCode = $(if ($vs.Count) { $vs[0] } else { 0 })
+        Network = $(if ($net.Count) { $net[0] } else { $true }) }
 }
 
 # One-shot tools run to completion in the project folder; background tools are detached.

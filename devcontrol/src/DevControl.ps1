@@ -104,6 +104,7 @@ $script:ProjectsCached = $false
 $script:Containers = @()
 $script:Tools = @()                 # background tool pid files (running or exited)
 $script:VSCodeCount = 0             # Linux VS Code instances running in WSL (from Get-DcRuntime)
+$script:NetWarned = $false          # "WSL has no network" offered once per WSL run (FIX-028)
 $script:ProjectCfg = @{}            # projects.json "projects"
 $script:ConfigMeta = $null          # projects.json top level (groups, collapsed)
 $script:View = 'all'                # tab: all | running | ungrouped | hidden | g:<group> (saved in ui-state.json)
@@ -263,6 +264,7 @@ function Set-Status($st) {
     } elseif (-not $st.Running -and $was -ne $false) {
         if ($null -ne $was) { Log 'WSL: Stopped.' }
         $script:Containers = @(); $script:Tools = @(); $script:VSCodeCount = 0
+        $script:NetWarned = $false
         $ui.LiveText.Text = ''
         if ($script:Projects.Count -eq 0) { $script:Projects = @(Get-DcProjectCache) }
         $script:ProjectsCached = $true
@@ -393,6 +395,16 @@ function Update-Enablement {
     if ($script:TrayItems.Run) { $script:TrayItems.Run.Enabled = $free }
     if ($script:TrayItems.CodeOpen) { $script:TrayItems.CodeOpen.Enabled = $free }
     if ($script:TrayItems.CodeQuit) { $script:TrayItems.CodeQuit.Enabled = $free -and $run -and $script:VSCodeCount -gt 0 }
+    $fix = $free -and $run -and -not (Test-Job 'fixwin')
+    $ui.FixWinBtn.IsEnabled = $fix
+    $ui.FixWinBtn.Visibility = if ($run) { 'Visible' } else { 'Collapsed' }
+    if ($script:TrayItems.FixWin) { $script:TrayItems.FixWin.Enabled = $fix }
+    # Fix WSL is for when WSL calls hang, so a busy app (stuck on such a call) must not disable it.
+    $fixWsl = $run -and -not (Test-Job 'fixwsl')
+    $ui.FixWslBtn.IsEnabled = $fixWsl
+    $ui.FixWslBtn.Visibility = if ($run) { 'Visible' } else { 'Collapsed' }
+    if ($script:TrayItems.FixWsl) { $script:TrayItems.FixWsl.Enabled = $fixWsl }
+    if ($script:TrayItems.FixNet) { $script:TrayItems.FixNet.Enabled = $free }
     Show-Projects
 }
 
@@ -780,6 +792,12 @@ function Update-Runtime {
         $live = @($script:Containers | ForEach-Object { "c:$($_.Id)" }) + @($script:Tools | Where-Object { $_.Running } | ForEach-Object { "t:$($_.Slug)/$($_.Tool)" })
         foreach ($k in @($script:ChildOps.Keys)) { if ($live -notcontains $k) { $script:ChildOps.Remove($k) } }
         Update-Enablement
+        # Also catches a WSL that something else started (Start Menu, a terminal) without a network.
+        if (-not $r[0].Network -and -not $script:NetWarned -and -not $SelfTest -and (Get-DcNetworkingMode) -ne 'none') {
+            $script:NetWarned = $true
+            Log $script:DcNoNetworkMsg
+            Invoke-NetworkRepairFlow -Auto
+        }
     }
 }
 
@@ -826,6 +844,8 @@ function Stop-WslFlow([scriptblock]$Then) {
     $nt = @($script:Tools | Where-Object { $_.Running }).Count
     $msg = "Stop WSL and free its memory and CPU?`n`nThis runs wsl --shutdown:`n" +
            "  - $n running container(s) and $nt tool(s) stop`n  - terminals disconnect and VS Code windows close (save your work first)"
+    $ne = @(Get-DcLinuxExplorerWindows).Count
+    if ($ne) { $msg += "`n  - $ne Explorer window(s) showing Linux folders close (left open, they start WSL again)" }
     if (-not (Confirm-Dc $msg 'Stop WSL')) { Log 'Stop WSL cancelled.'; if ($Then) { & $Then $false }; return }
     Log 'Shutting down WSL...'
     $script:Busy = $true
@@ -855,7 +875,45 @@ function Invoke-Lifecycle($p) {
         Start-StatusPoll
         Update-Enablement
         if ($e -and $e.Message -like 'WSL did not stop*') { Invoke-ForceStopFlow $c.Then ($c.Type -eq 'start'); return }
+        if (-not $e -and ($r -join ' ') -like "*$($script:DcNoNetworkMsg)*" -and -not $SelfTest) {
+            $script:NetWarned = $true
+            Invoke-NetworkRepairFlow -Auto -Then $c.Then; return
+        }
         if ($c.Then) { & $c.Then (-not $e) }
+    }
+}
+
+# FIX-028: WSL came up without a network (mirrored networking fell back to none). Stop WSL, delete the stale
+# FSE Switch networks and restart the Host Network Service (UAC), start WSL again.
+function Invoke-NetworkRepairFlow([scriptblock]$Then, [switch]$Auto) {
+    if ($script:Busy -or $script:PendingLifecycle -or $script:Seq) { Log 'Busy - wait for the current operation to finish, then use Fix WSL network in the tray menu.'; if ($Then) { & $Then $false }; return }
+    $msg = $(if ($Auto) { "WSL is running WITHOUT A NETWORK: Linux has no route to the internet, so Claude Code (chats, login, Remote Control), git, apt and docker pulls fail.`n`n" +
+                          "This happens when WSL's mirrored networking fails at startup (FIX-028).`n`n" }
+             else { "Repair WSL networking (no internet inside Linux)?`n`n" }) +
+           "Repair it now? This:`n  - stops WSL (VS Code windows close, containers stop - save your work first)`n" +
+           "  - resets Windows' Host Network Service (Windows asks for administrator permission)`n  - starts WSL again"
+    if (-not (Confirm-Dc $msg 'WSL network')) { Log 'WSL network repair skipped (tray menu: Fix WSL network).'; if ($Then) { & $Then $false }; return }
+    Log 'Repairing WSL network (stop WSL, reset Host Network Service, start WSL)...'
+    $script:Busy = $true
+    Update-Enablement
+    Start-Bg -Name 'lifecycle' -Kind 'action' -Work {
+        $out = @()
+        if (-not (Test-DcWslDown)) { $out += Stop-DcWsl }
+        $out += Repair-DcWslNetwork
+        $out += Start-DcWslBoot
+        $out -join ' '
+    } -Context @{ Then = $Then } -Done {
+        param($r, $e, $c)
+        $script:Busy = $false
+        if ($e) { Log "WSL network repair FAILED: $($e.Message)" } else { Log ($r -join ' ') }
+        $script:State.Running = $null
+        Start-StatusPoll
+        Update-Enablement
+        if ($e -and $e.Message -like 'WSL did not stop*') { Invoke-ForceStopFlow $c.Then $false; return }
+        $still = -not $e -and ($r -join ' ') -like "*$($script:DcNoNetworkMsg)*"
+        if ($still) { Log 'WSL still has no network after the repair. Restart Windows (Start > Power > Restart), then start WSL from Dev Control.' }
+        $script:NetWarned = $true
+        if ($c.Then) { & $c.Then ((-not $e) -and -not $still) }
     }
 }
 
@@ -1036,6 +1094,59 @@ function Stop-VSCodeFlow {
     if (-not (Confirm-Dc $msg 'Quit VS Code')) { Log 'Quit VS Code cancelled.'; return }
     Log 'Quitting VS Code in WSL...'
     Start-Bg -Name 'quitcode' -Kind 'action' -Work { Stop-DcVSCode } -Done {
+        param($r, $e)
+        if ($e) { Log "FAILED: $($e.Message)" } else { Log ($r -join ' ') }
+        Update-Runtime
+        Update-Enablement
+    }
+}
+
+# Fix Linux windows (FIX-022): brings back Linux windows that vanished (minimized or off-screen when WSLg
+# reconnected) and fixes clicks landing in the wrong place (stale monitor layout). A Linux VS Code window
+# WSLg already dropped cannot come back that way, so when one is still missing it offers the clean
+# restart, which reopens every window with its editors.
+function Repair-WindowsFlow {
+    if ($script:Seq -or $script:Busy -or $script:PendingLifecycle -or (Test-Job 'fixwin')) { Log 'Busy - wait for the current operation to finish.'; return }
+    if (-not $script:State.Running) { Log 'WSL is stopped - there are no Linux windows to fix.'; return }
+    Log 'Fixing Linux windows (restore, move on screen, reconnect WSLg)...'
+    Start-Bg -Name 'fixwin' -Kind 'action' -Work { Repair-DcLinuxWindows } -Done {
+        param($r, $e)
+        Update-Enablement
+        if ($e) { Log "Fix Linux windows FAILED: $($e.Message)"; return }
+        $res = $r[0]
+        foreach ($l in @($res.Lines)) { Log $l }
+        if ($script:VSCodeCount -le 0 -or $res.CodeWindows -lt 0) { return }
+        $n = $res.CodeWindows
+        $msg = if ($n -eq 0) { "Linux VS Code is running, but none of its windows came back.`n`n" }
+               else { "Linux VS Code has $n window(s) on screen now.`n`nIs one still missing? " }
+        $msg += "A window WSLg has dropped only comes back if VS Code restarts. Restart Linux VS Code now?`n`n" +
+                "  - it quits cleanly and reopens with all its windows and unsaved editors (hot exit)`n" +
+                "  - terminals and Claude Code sessions in it stop (a reply in progress needs 'continue')"
+        if (Confirm-Dc $msg 'Fix Linux windows') { Restart-CodeFlow } else { Log 'Linux VS Code restart skipped.' }
+    }
+    Update-Enablement
+}
+
+# Fix WSL (FIX-030): ends leaked WSL relay processes, which make new wsl.exe calls hang - screenshot paste
+# into Linux, explorer.exe / clip.exe from Linux, and this app's own status and project list. Runs even
+# while another operation is busy: that operation may itself be stuck on a hanging wsl.exe call.
+function Repair-WslFlow {
+    if (Test-Job 'fixwsl') { Log 'Fix WSL is already running.'; return }
+    if (-not $script:State.Running) { Log 'WSL is stopped - nothing to fix.'; return }
+    Log 'Fixing WSL calls (ending stuck WSL relay processes; up to 90 s if WSL is hanging)...'
+    Start-Bg -Name 'fixwsl' -Kind 'action' -Work { Repair-DcWslRelays } -Done {
+        param($r, $e)
+        Update-Enablement
+        if ($e) { Log "Fix WSL FAILED: $($e.Message)"; return }
+        foreach ($l in @($r[0].Lines)) { Log $l }
+        if ($r[0].Ended -gt 0) { Update-Runtime }
+    }
+    Update-Enablement
+}
+
+function Restart-CodeFlow {
+    Log 'Restarting Linux VS Code (quit, then reopen its windows)...'
+    Start-Bg -Name 'restartcode' -Kind 'action' -Work { Restart-DcVSCode } -Done {
         param($r, $e)
         if ($e) { Log "FAILED: $($e.Message)" } else { Log ($r -join ' ') }
         Update-Runtime
@@ -1889,6 +2000,12 @@ if ($settings.trayIcon) {
     $script:TrayItems.CodeOpenWin.add_Click({ Open-EmptyCode 'windows' })
     $script:TrayItems.CodeQuit = New-Object System.Windows.Forms.ToolStripMenuItem 'Quit Linux VS Code'
     $script:TrayItems.CodeQuit.add_Click({ Stop-VSCodeFlow })
+    $script:TrayItems.FixWin = New-Object System.Windows.Forms.ToolStripMenuItem 'Fix Linux windows (vanished / wrong clicks)'
+    $script:TrayItems.FixWin.add_Click({ Repair-WindowsFlow })
+    $script:TrayItems.FixWsl = New-Object System.Windows.Forms.ToolStripMenuItem 'Fix WSL (paste / explorer.exe / clip.exe hang)'
+    $script:TrayItems.FixWsl.add_Click({ Repair-WslFlow })
+    $script:TrayItems.FixNet = New-Object System.Windows.Forms.ToolStripMenuItem 'Fix WSL network (no internet in Linux)'
+    $script:TrayItems.FixNet.add_Click({ Invoke-NetworkRepairFlow })
     $script:TrayItems.Exit = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
     $script:TrayItems.Exit.add_Click({ Exit-App })
     [void]$menu.Items.Add($script:TrayItems.Open)
@@ -1899,6 +2016,9 @@ if ($settings.trayIcon) {
     [void]$menu.Items.Add($script:TrayItems.CodeOpen)
     [void]$menu.Items.Add($script:TrayItems.CodeOpenWin)
     [void]$menu.Items.Add($script:TrayItems.CodeQuit)
+    [void]$menu.Items.Add($script:TrayItems.FixWin)
+    [void]$menu.Items.Add($script:TrayItems.FixWsl)
+    [void]$menu.Items.Add($script:TrayItems.FixNet)
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     [void]$menu.Items.Add($script:TrayItems.Exit)
     $script:Tray.ContextMenuStrip = $menu
@@ -1915,6 +2035,8 @@ $ui.StopWslBtn.add_Click({ Stop-WslFlow })
 $ui.CodeOpenBtn.add_Click({ Open-EmptyCode 'linux' })
 $ui.CodeOpenWinBtn.add_Click({ Open-EmptyCode 'windows' })
 $ui.CodeQuitBtn.add_Click({ Stop-VSCodeFlow })
+$ui.FixWinBtn.add_Click({ Repair-WindowsFlow })
+$ui.FixWslBtn.add_Click({ Repair-WslFlow })
 $ui.MoreBtn.add_Click({ Open-Menu (New-MoreMenu) $ui.MoreBtn })
 
 # Buttons inside item templates: Uid = action, Tag = project name or child tag.

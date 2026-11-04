@@ -9,3 +9,6 @@ settings.json
 projects.json
 projects.json.bak
 presets.json
+
+# Per-machine notes (personal paths, project names): never commit
+local-notes/

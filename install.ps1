@@ -115,7 +115,11 @@ if (Read-YesNo 'Install the WSLg Helper?') {
     Stop-ScriptProcess 'wslg-helper.ps1'
     New-Item -ItemType Directory -Force $HelperDir | Out-Null
     Copy-Item (Join-Path $Root 'windows\wslg-helper\wslg-helper.ps1') $HelperDir -Force
-    (@{ distro = $Distro } | ConvertTo-Json) | Set-Content (Join-Path $HelperDir 'helper-config.json') -Encoding ASCII
+    # Keep a hand-set "wakeRestart" (FIX-024) across reinstalls.
+    $hcPath = Join-Path $HelperDir 'helper-config.json'
+    $hc = [ordered]@{ distro = $Distro }
+    try { $old = Get-Content $hcPath -Raw -ErrorAction Stop | ConvertFrom-Json; if ($old.PSObject.Properties['wakeRestart']) { $hc.wakeRestart = [bool]$old.wakeRestart } } catch {}
+    ($hc | ConvertTo-Json) | Set-Content $hcPath -Encoding ASCII
     $script = Join-Path $HelperDir 'wslg-helper.ps1'
     $me = "$env:USERDOMAIN\$env:USERNAME"
     $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\conhost.exe') `

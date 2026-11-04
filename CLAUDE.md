@@ -58,10 +58,13 @@ Dev Control has its own developer guide: `devcontrol/CLAUDE.md`.
   Never restarts `msrdc` while a Linux window (`RAIL_WINDOW`, not `sub-surface`) is minimized - WSLg
   does not re-send minimized windows on reconnect and nothing can restore them afterwards - or off every
   screen (FIX-012). After a screen change it moves off-screen ones to the primary screen first
-  (`-Rescue` does it by hand). Replaces an unconvertible Linux HTML copy with its plain text (FIX-018). Also restarts msrdc 10 s after a WSLg wake that followed >= 20 min idle
-  (`rdp_rail_idle/wake_handler`; stale windows otherwise), and every 30 s recreates Dev Control's keep-alive
+  (`-Rescue` does it by hand; `-Repair` = Dev Control's Fix windows button: restore minimized, rescue, restart msrdc, FIX-022). Timers use `Get-Now` (monotonic), never `Get-Date` (FIX-021). Replaces an unconvertible Linux HTML copy with its plain text (FIX-018). Never restarts msrdc while the mic is in use (`Test-MicInUse`: a disconnect then aborts Weston + PulseAudio, FIX-023). The restart 10 s after a WSLg wake that followed >= 20 min idle
+  (`rdp_rail_idle/wake_handler`) is OFF unless `helper-config.json` `"wakeRestart": true` and needs a real lock/sleep (FIX-017, 023, 024). Every 30 s it recreates Dev Control's keep-alive
   session (`exec sleep infinity`) if it is gone while the distro is up (FIX-017). After a Weston crash/restart
-  (weston.log `Command line:` again) it reopens Linux VS Code if its windows were up (FIX-020). Diagnosing with your own Win32 scans: output written inside an
+  (weston.log `Command line:` again) it reopens Linux VS Code if its windows were up (FIX-020). Every 5 min it ends
+  leaked WSL `Relay` processes as root (orphaned, childless, named exactly `Relay`; dozens make new `wsl.exe` calls
+  and Linux-to-Windows interop hang - FIX-030); that call never blocks the loop. `-Reap` = Dev Control's Fix WSL
+  button (same cleanup now, last output line `RELAYS <n>`, -1 = WSL did not answer). Diagnosing with your own Win32 scans: output written inside an
   `EnumWindows` scriptblock callback is lost - collect in C#.
 - Never wakes WSL: every `\\wsl.localhost` / `wsl.exe` access is gated by `Test-DistroUp` (fresh `vmmemWSL`,
   Dev Control's `wsl-stopping` marker, cached `--list --running`). Opening `\\wsl.localhost` boots a stopped
@@ -79,7 +82,7 @@ Dev Control has its own developer guide: `devcontrol/CLAUDE.md`.
   `..._ALLOW_ZAP`, `..._ALLOW_ALT_F4_TO_CLOSE_APP`, `..._DEBUG_LEVEL`, ... Values are logged at the top of
   `weston.log` (`RDPRAIL-shell: local-move:0`).
 - Clipboard formats bridged: `text/plain;charset=utf-8`, `text/html`, `text/rtf`, `image/bmp`. No PNG.
-- `msrdc.exe` exits and is relaunched by WSLGd on every sleep/wake/display change; killing it is the
+- `msrdc.exe` is relaunched by WSLGd when it exits; through Modern Standby on the dev laptop it keeps its connection (no relaunch on wake). Killing it is the
   supported-by-behaviour way to force a fresh monitor layout.
 - `wslg.exe` may exit -1 without running anything; use `conhost.exe --headless wsl.exe -e ...`.
 - WSLg regenerates "Visual Studio Code (<distro>)" in the Start Menu from `/usr/share/applications/code.desktop`

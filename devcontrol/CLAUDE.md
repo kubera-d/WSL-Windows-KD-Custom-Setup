@@ -46,6 +46,12 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
   `vmmemWSL`, held for 8 s (something opening `\\wsl.localhost` reboots WSL instantly). It writes
   `%LOCALAPPDATA%\DevControl\wsl-stopping`, which the WSLg Helper honours (`Start-DcWslBoot` deletes it).
   Its "WSL did not stop" error makes the UI offer `Stop-DcWslForce` (UAC, `hcsdiag kill`). FIX-010.
+  Before each attempt it closes Explorer windows on `\\wsl.localhost` / `\\wsl$` folders: Explorer refreshes
+  them after the shutdown and boots WSL again ~10 s later, past the 8 s check (FIX-029).
+- WSL can boot with NO network (mirrored networking falls back to none, FIX-028). `Start-DcWslBoot` and
+  `Get-DcRuntime` (`N` line) test for a default route (`$script:DcNetTest`); the UI then offers
+  `Invoke-NetworkRepairFlow` once per WSL run (never under `-SelfTest`): Stop-DcWsl > `Repair-DcWslNetwork`
+  (UAC: delete stale `FSE Switch` HNS networks, restart `hns`) > Start-DcWslBoot. Tray: Fix WSL network.
 - Every external process from the app goes through `Invoke-DcProcess` / `Start-DcDetached`
   (CreateNoWindow). The app has no console, so a plain `& exe` pops a console window.
 - `.ps1` and `.xaml` files must be ASCII-only (PS 5.1 reads BOM-less files as ANSI). `Deploy.ps1`

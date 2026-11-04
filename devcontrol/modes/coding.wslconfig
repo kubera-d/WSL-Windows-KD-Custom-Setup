@@ -1,4 +1,8 @@
 # DevControl mode "coding": copied to %USERPROFILE%\.wslconfig when you switch to it. Adjust memory/processors to your machine's RAM and CPUs.
+[general]
+# Never stop an idle distro: Linux VS Code (WSLg) windows are not wsl.exe sessions, so WSL stopped under open windows (FIX-026).
+instanceIdleTimeout=-1
+
 [wsl2]
 memory=16GB
 processors=8

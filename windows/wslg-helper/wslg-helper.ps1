@@ -17,6 +17,9 @@
 #    Linux then owns the clipboard and Windows apps would see no image, so when you switch back OUT
 #    (having copied nothing new) the original image is put back on the Windows clipboard.
 #    Needs wl-clipboard in the distro (install.ps1 installs it).
+# 3. Leaked WSL relays. Some wsl.exe calls leave their Linux-side "Relay" process behind; once dozens pile
+#    up, every new wsl.exe call (and Linux running explorer.exe / clip.exe) slows down and then hangs.
+#    Every few minutes the leaked ones are ended (FIX-030).
 #
 # Never wake WSL: opening anything under \\wsl.localhost or running wsl.exe BOOTS a stopped distro,
 # and msrdc.exe outlives a wsl --shutdown by a few seconds. Test-DistroUp gates every Linux access
@@ -24,16 +27,25 @@
 #
 # Manual check:  powershell -STA -File wslg-helper.ps1 -Status
 # Manual rescue: powershell -File wslg-helper.ps1 -Rescue   (moves off-screen Linux windows to the main screen)
-param([switch]$Status, [switch]$Rescue, [string]$Distro)
+# Full repair:   powershell -File wslg-helper.ps1 -Repair   (Dev Control's Fix Linux windows button)
+# Relay cleanup: powershell -File wslg-helper.ps1 -Reap     (Dev Control's Fix WSL button, FIX-030)
+param([switch]$Status, [switch]$Rescue, [switch]$Repair, [switch]$Reap, [string]$Distro)
 
 $ErrorActionPreference = 'Continue'
 $Here   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $OwnLog = Join-Path $Here 'wslg-helper.log'
 $TmpPng = Join-Path $Here 'clipboard.png'
 
-if (-not $Distro) {
-    $cfg = Join-Path $Here 'helper-config.json'
-    if (Test-Path $cfg) { try { $Distro = (Get-Content $cfg -Raw | ConvertFrom-Json).distro } catch {} }
+# helper-config.json: distro (written by install.ps1); "wakeRestart": true turns the FIX-017 restart after a
+# wake back on (off since FIX-024).
+$WakeRestart = $false
+$cfg = Join-Path $Here 'helper-config.json'
+if (Test-Path $cfg) {
+    try {
+        $hc = Get-Content $cfg -Raw | ConvertFrom-Json
+        if (-not $Distro) { $Distro = $hc.distro }
+        if ($hc.PSObject.Properties['wakeRestart']) { $WakeRestart = [bool]$hc.wakeRestart }
+    } catch {}
 }
 if (-not $Distro) {
     try {
@@ -51,9 +63,11 @@ $MonitorEverySec = 5
 $StableSec       = 10   # Windows layout must be unchanged this long before acting (monitors settle after wake)
 $CooldownSec     = 120  # minimum gap between msrdc restarts
 $WakeIdleSec     = 1200 # a WSLg idle (screen off / lock) at least this long ...
-$WakeSettleSec   = 10   # ... is followed, this long after the wake, by one msrdc restart (FIX-017)
-$KeepAliveEverySec = 30 # how often to check that the keep-alive wsl.exe session still exists (FIX-017)
+$WakeSettleSec   = 10   # ... is followed, this long after the wake, by one msrdc restart (FIX-017; only with wakeRestart)
+$KeepAliveEverySec = 5  # how often to check that the keep-alive wsl.exe session still exists (FIX-017; 5 s: WSL idle-stops a distro within seconds of its last session, FIX-026)
 $MaxTries        = 3    # restarts per distinct mismatch before giving up until the layout changes
+$YoungMsrdcSec   = 45   # never restart a msrdc that started less than this long ago (still connecting, FIX-025)
+$RelayReapEverySec = 300 # how often to end leaked wsl.exe relay processes in the distro (FIX-030)
 # Clipboard tuning
 $TickMs          = 200
 $SettleMs        = 1500 # after handing an image to Linux, wait this long before noting the clipboard sequence
@@ -179,6 +193,30 @@ public static class WH {
         }
         return n;
     }
+    // Restores minimized Linux windows (what a taskbar click does) so a msrdc restart cannot lose them.
+    [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr h, int cmd);
+    public static int RestoreMinimized(uint[] pids) {
+        var list = new List<IntPtr>();
+        EnumWindows((h, l) => {
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (Array.IndexOf(pids, p) < 0 || !IsIconic(h)) return true;
+            var c = new System.Text.StringBuilder(64); GetClassName(h, c, 64);
+            var t = new System.Text.StringBuilder(256); GetWindowText(h, t, 256);
+            if (c.ToString() == "RAIL_WINDOW" && t.Length > 0 && !t.ToString().StartsWith("sub-surface")) list.Add(h);
+            return true; }, IntPtr.Zero);
+        int n = 0;
+        foreach (var h in list) if (ShowWindowAsync(h, 9 /* SW_RESTORE */)) n++;
+        return n;
+    }
+    // How many visible Linux top-level windows have the text in their title.
+    public static int CountTitled(uint[] pids, string part) {
+        int n = 0;
+        foreach (var h in LinuxWindows(pids)) {
+            var t = new System.Text.StringBuilder(256); GetWindowText(h, t, 256);
+            if (t.ToString().IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0) n++;
+        }
+        return n;
+    }
 }
 '@
 [WH]::DpiAware()
@@ -192,11 +230,17 @@ function Write-Log($msg) {
     if ($Status) { Write-Output $line }
 }
 
+# Timers use a monotonic clock, not the wall clock: a clock correction (a 4 h jump after booting Linux,
+# which keeps the hardware clock in UTC) froze every cooldown and schedule until the clock caught up, so
+# the monitor sync skipped a dock (FIX-021). Only the log and file-time comparisons use Get-Date.
+$script:clockBase = Get-Date; $script:clock = [Diagnostics.Stopwatch]::StartNew()
+function Get-Now { $script:clockBase.Add($script:clock.Elapsed) }
+
 $script:msrdcCache = @(); $script:msrdcAt = [datetime]::MinValue
 function Get-MsrdcPids {
-    if (((Get-Date) - $script:msrdcAt).TotalSeconds -ge 2) {
+    if (((Get-Now) - $script:msrdcAt).TotalSeconds -ge 2) {
         $script:msrdcCache = @(Get-Process msrdc -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
-        $script:msrdcAt = Get-Date
+        $script:msrdcAt = Get-Now
     }
     ,$script:msrdcCache
 }
@@ -210,10 +254,10 @@ function Test-DistroUp {
     if (-not (Get-Process vmmemWSL -ErrorAction SilentlyContinue)) { $script:upAt = [datetime]::MinValue; return $false }
     $m = Get-Item $StopMarker -ErrorAction SilentlyContinue
     if ($m -and ((Get-Date) - $m.LastWriteTime).TotalSeconds -lt 120) { $script:upAt = [datetime]::MinValue; return $false }
-    if (((Get-Date) - $script:upAt).TotalSeconds -ge 15) {
+    if (((Get-Now) - $script:upAt).TotalSeconds -ge 15) {
         $names = @(& wsl.exe --list --running --quiet 2>$null | ForEach-Object { ($_ -replace "`0", '').Trim() })
         $script:upOk = $names -contains $Distro
-        $script:upAt = Get-Date
+        $script:upAt = Get-Now
     }
     $script:upOk
 }
@@ -242,10 +286,19 @@ function Update-WslgLayout {
             # pass are history, not events.
             if ($line -match '^\[(\d\d):(\d\d):(\d\d)[^\]]*\] rdp_rail_(idle|wake)_handler') {
                 $sec = [int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [int]$Matches[3]
-                if ($Matches[4] -eq 'idle') { $script:idleSec = $sec }
+                if ($Matches[4] -eq 'idle') { $script:idleSec = $sec; $script:awaySeen = $false }
                 elseif ($script:logPrimed -and $null -ne $script:idleSec) {
                     $idle = $sec - $script:idleSec; if ($idle -lt 0) { $idle += 86400 }
-                    if ($idle -ge $WakeIdleSec) { $script:wokeAt = Get-Date; $script:wokeIdle = $idle }
+                    # WSLg is "idle" whenever no Linux window gets input - also while you work in Windows
+                    # apps (a Teams call). Only a real absence (locked or asleep) leaves stale windows; a
+                    # restart after mere Windows work hit the start of a dictation and crashed WSLg (FIX-023).
+                    # Off by default: on this hardware msrdc keeps its connection through Modern Standby, so the
+                    # restart was the only reconnect and made every Linux window vanish ~10 s after each wake.
+                    # Stale windows after a wake: Dev Control's Fix windows (FIX-024).
+                    if ($idle -ge $WakeIdleSec -and $script:awaySeen -and -not $WakeRestart) { Write-Log ("monitors: woke after {0} min away - windows left as they are (wakeRestart off; Fix windows in Dev Control if they do not open)" -f [int]($idle / 60)) }
+                    elseif ($idle -ge $WakeIdleSec -and $script:awaySeen) { $script:wokeAt = Get-Now; $script:wokeIdle = $idle }
+                    elseif ($idle -ge $WakeIdleSec) { Write-Log ("monitors: Linux windows idle {0} min while Windows was in use (not locked/asleep) - no restart" -f [int]($idle / 60)) }
+                    $script:awaySeen = $false
                 }
             }
             # Weston itself restarted (WSLGd relaunches it after a crash - "terminated with signal 11"): every
@@ -253,9 +306,11 @@ function Update-WslgLayout {
             # (all windows are new) and let Invoke-CodeRecovery reopen VS Code (FIX-020).
             if ($line -match '\] Command line: /usr/bin/weston ') {
                 $script:idleSec = $null; $script:wokeAt = $null
-                if ($script:logPrimed) { $script:westonRestartAt = Get-Date }
+                if ($script:logPrimed) { $script:westonRestartAt = Get-Now }
             }
-            if ($line.Contains('Client: DisplayLayoutChange')) { $script:liveChange = $true }
+            # Only a change seen live counts: one in the history read at helper start would restart msrdc
+            # (blink every Linux window) for a change that was dealt with long ago.
+            if ($line.Contains('Client: DisplayLayoutChange')) { if ($script:logPrimed) { $script:liveChange = $true } }
             elseif ($line.Contains('xf_peer_adjust_monitor_layout')) { $script:liveChange = $false }   # fresh connection
             if ($line -match $monRe) {
                 if ($Matches[1] -eq '0') { $script:group = @() }
@@ -277,11 +332,11 @@ try {
     $dc = Join-Path $env:LOCALAPPDATA 'Programs\DevControl\settings.json'
     if (Test-Path $dc) { $j = Get-Content -Raw $dc | ConvertFrom-Json; if ($j.PSObject.Properties['keepAlive'] -and -not $j.keepAlive) { $KeepAliveOn = $false } }
 } catch {}
-$script:keepAliveProc = $null; $script:keepAliveNext = Get-Date
+$script:keepAliveProc = $null; $script:keepAliveNext = Get-Now
 
 function Invoke-KeepAliveCheck {
-    if (-not $KeepAliveOn -or (Get-Date) -lt $script:keepAliveNext) { return }
-    $script:keepAliveNext = (Get-Date).AddSeconds($KeepAliveEverySec)
+    if (-not $KeepAliveOn -or (Get-Now) -lt $script:keepAliveNext) { return }
+    $script:keepAliveNext = (Get-Now).AddSeconds($KeepAliveEverySec)
     if (-not (Test-DistroUp)) { return }
     $ka = @(Get-CimInstance Win32_Process -Filter "Name='wsl.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -like '*exec sleep infinity*' })
@@ -293,6 +348,57 @@ function Invoke-KeepAliveCheck {
     Write-Log 'keep-alive: the session was gone (WSL could idle out under open windows) - started a new one'
 }
 
+# FIX-030: WSL 2.7 sometimes leaves the Linux end of a finished wsl.exe call running - a root process named
+# exactly "Relay", orphaned (parent PID 1), with no children, waiting forever. Dev Control's 30 s polls left
+# ~70 in a day; with that many, new wsl.exe calls took 30 s and then failed (Wsl/Service/0x8007274c), and so
+# did Linux-to-Windows calls (explorer.exe, clip.exe) and the screenshot hand-off (wl-copy). Live relays are
+# named "Relay(<pid>)" or have a child, so they never match. They ignore SIGTERM, hence SIGKILL; the count
+# logged is how many are actually gone. Runs as root without waiting for the result:
+# while WSL is slow, a blocking call would stall the clipboard handling.
+$script:reapProc = $null; $script:reapStarted = $null; $script:reapNext = (Get-Now).AddSeconds(60)
+$ReapSh = @'
+parents=" $(echo $(ps -eo ppid=)) "
+gone=""
+for p in $(ps -eo pid=,ppid=,etimes=,comm= | awk '$4=="Relay" && $2==1 && $3>MINAGE {print $1}'); do
+  case "$parents" in *" $p "*) continue ;; esac
+  kill -KILL "$p" 2>/dev/null && gone="$gone $p"
+done
+sleep 1
+n=0
+for p in $gone; do kill -0 "$p" 2>/dev/null || n=$((n+1)); done
+echo "$n"
+'@
+
+# wsl.exe as root running $ReapSh for relays older than $MinAge seconds; prints how many are gone.
+function Start-ReapProcess([int]$MinAge) {
+    $sh = ($ReapSh -replace "`r`n", "`n").Replace('MINAGE', [string]$MinAge)
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sh))
+    $psi = New-Object Diagnostics.ProcessStartInfo 'wsl.exe', "-d $Distro -u root -- sh -c `"echo $b64 | base64 -d | sh`""
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    [Diagnostics.Process]::Start($psi)
+}
+
+function Invoke-RelayReap {
+    if ($script:reapProc) {
+        if (-not $script:reapProc.HasExited) {
+            if (((Get-Now) - $script:reapStarted).TotalSeconds -lt 120) { return }
+            try { $script:reapProc.Kill() } catch {}
+            $script:reapProc = $null
+            Write-Log 'relays: WSL did not answer the cleanup call within 2 min - new wsl.exe calls are hanging (FIX-030)'
+            return
+        }
+        $n = 0; [void][int]::TryParse($script:reapProc.StandardOutput.ReadToEnd().Trim(), [ref]$n)
+        $code = $script:reapProc.ExitCode; $script:reapProc = $null
+        if ($code -ne 0) { Write-Log "relays: cleanup call failed (exit $code)" }
+        elseif ($n -gt 0) { Write-Log "relays: ended $n leaked WSL relay process(es) (they slow down and then block new wsl.exe calls, FIX-030)" }
+    }
+    if ((Get-Now) -lt $script:reapNext) { return }
+    $script:reapNext = (Get-Now).AddSeconds($RelayReapEverySec)
+    if (-not (Test-DistroUp)) { return }
+    $script:reapProc = Start-ReapProcess 300; $script:reapStarted = Get-Now
+}
+
 # FIX-020: when WSLg's display server (Weston) crashes, Linux VS Code loses its display and quits with every
 # window. If VS Code windows were on screen shortly before, reopen VS Code: code-linux with no folder makes
 # it restore all windows of the last session (window.restoreWindows), Claude panels included. Only if no
@@ -301,12 +407,12 @@ $script:codeSeenAt = [datetime]::MinValue; $script:westonRestartAt = $null
 
 function Update-CodeSeen {
     $pids = [uint32[]](Get-MsrdcPids)
-    if ($pids.Count -and [WH]::HasWindowTitled($pids, 'Visual Studio Code')) { $script:codeSeenAt = Get-Date }
+    if ($pids.Count -and [WH]::HasWindowTitled($pids, 'Visual Studio Code')) { $script:codeSeenAt = Get-Now }
 }
 
 function Invoke-CodeRecovery {
     if (-not $script:westonRestartAt) { return }
-    if (((Get-Date) - $script:westonRestartAt).TotalSeconds -lt 15) { return }   # let WSLg and msrdc settle
+    if (((Get-Now) - $script:westonRestartAt).TotalSeconds -lt 15) { return }   # let WSLg and msrdc settle
     $restartAt = $script:westonRestartAt; $script:westonRestartAt = $null
     if (($restartAt - $script:codeSeenAt).TotalSeconds -gt 180) { return }      # VS Code was not open
     if (-not (Test-DistroUp)) { return }
@@ -326,7 +432,22 @@ function Invoke-CodeRecovery {
     }
 }
 
-$mon = @{ lastWin = $null; winSince = Get-Date; lastRestart = [datetime]::MinValue; triesKey = $null; tries = 0; next = Get-Date; rescues = 0; rescuedFor = $null; minLogged = $null }
+$mon = @{ lastWin = $null; winSince = Get-Now; lastRestart = [datetime]::MinValue; triesKey = $null; tries = 0; next = Get-Now; rescues = 0; rescuedFor = $null; minLogged = $null; micLogged = $false; pidKey = $null; pidSince = [datetime]::MinValue }
+
+# A msrdc disconnect while the microphone channel is open aborts Weston AND PulseAudio (WSLg bug,
+# stderr.log: "rdpaudioin.c: rdp_audio_in_destroy: Assertion `!...IsOpen(...)' failed"): every Linux
+# window closes, and audio is gone for ~2 minutes while PulseAudio restarts (FIX-023). In use = the
+# WSLg mic (RDPSource) is not SUSPENDED or something is recording. If the audio server cannot be asked
+# (down, restarting) that counts as in use too. Only called right before a restart, behind Test-DistroUp.
+function Test-MicInUse {
+    if (-not (Test-DistroUp)) { return $false }
+    $src = @(& wsl.exe -d $Distro -e pactl list short sources 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) { return $true }
+    $rdp = $src | Where-Object { $_ -match '\tRDPSource\t' } | Select-Object -First 1
+    if ($rdp -and $rdp -notmatch '\tSUSPENDED\s*$') { return $true }
+    $rec = @(& wsl.exe -d $Distro -e pactl list short source-outputs 2>$null | Where-Object { "$_".Trim() })
+    $rec.Count -gt 0
+}
 
 # A msrdc restart makes WSLg re-send its windows, and it drops every Linux window that is not on a
 # current screen: after undocking they vanish (no window, nothing in the taskbar) until the screens
@@ -336,6 +457,9 @@ $mon = @{ lastWin = $null; winSince = Get-Date; lastRestart = [datetime]::MinVal
 function Test-SafeToRestartMsrdc {
     $pids = [uint32[]](Get-MsrdcPids)
     if ($pids.Count -eq 0) { return $true }
+    # A msrdc that (re)connected moments ago is still re-creating its windows; killing it then destroys
+    # them for good (weston.log "rdp_rail_destroy_window: update is still pending", FIX-025).
+    if (((Get-Now) - $mon.pidSince).TotalSeconds -lt $YoungMsrdcSec) { return $false }
     # Windows minimizes windows of a disconnected monitor; a minimized Linux window does not survive a
     # msrdc restart (FIX-012). Wait until none is minimized.
     $min = [WH]::MinimizedTitles($pids)
@@ -344,6 +468,11 @@ function Test-SafeToRestartMsrdc {
         return $false
     }
     $mon.minLogged = $null
+    if (Test-MicInUse) {
+        if (-not $mon.micLogged) { Write-Log 'monitors: NOT restarting msrdc while the microphone is in use (dictation / call) - WSLg would crash'; $mon.micLogged = $true }
+        return $false
+    }
+    $mon.micLogged = $false
     $left = [WH]::StrandedTitles($pids)
     if (-not $left) { $mon.rescues = 0; return $true }
     if ($mon.rescues -ge 2) {
@@ -353,25 +482,32 @@ function Test-SafeToRestartMsrdc {
     $n = [WH]::RescueStranded($pids)
     $mon.rescues++
     Write-Log "monitors: moved $n Linux window(s) onto the main screen before restarting msrdc: $left"
-    $mon.next = (Get-Date).AddSeconds(3)   # let WSLg take the new positions, then check again
+    $mon.next = (Get-Now).AddSeconds(3)   # let WSLg take the new positions, then check again
     $false
 }
 
 function Invoke-MonitorSync {
+    # A new msrdc = a fresh connection, which carries the current layout and re-sends every window: a live
+    # change from before it is already handled (FIX-025). Also starts the young-msrdc wait above.
+    $pidKey = (@(Get-MsrdcPids) | Sort-Object) -join ','
+    if ($pidKey -ne $mon.pidKey) {
+        if ($mon.pidKey -and $script:liveChange) { $script:liveChange = $false; Write-Log 'monitors: msrdc reconnected by itself after the screen change - no restart needed' }
+        $mon.pidKey = $pidKey; $mon.pidSince = Get-Now
+    }
     $win = [WH]::Layout()
-    if ($win -ne $mon.lastWin) { $mon.lastWin = $win; $mon.winSince = Get-Date; return }
-    if (((Get-Date) - $mon.winSince).TotalSeconds -lt $StableSec) { return }
+    if ($win -ne $mon.lastWin) { $mon.lastWin = $win; $mon.winSince = Get-Now; return }
+    if (((Get-Now) - $mon.winSince).TotalSeconds -lt $StableSec) { return }
 
     # Screens changed (undocked): bring Linux windows left on a removed screen to the main screen, like
     # Windows does for its own windows. Only in the first minute after a change, so a window you park
     # half off-screen yourself is left alone.
-    if ($mon.lastWin -ne $mon.rescuedFor -and ((Get-Date) - $mon.winSince).TotalSeconds -lt 70) {
+    if ($mon.lastWin -ne $mon.rescuedFor -and ((Get-Now) - $mon.winSince).TotalSeconds -lt 70) {
         $pids = [uint32[]](Get-MsrdcPids)
         $left = if ($pids.Count) { [WH]::StrandedTitles($pids) } else { '' }
         if ($left) {
             $n = [WH]::RescueStranded($pids)
             Write-Log "monitors: screens changed - moved $n Linux window(s) onto the main screen: $left"
-            $mon.next = (Get-Date).AddSeconds(3)
+            $mon.next = (Get-Now).AddSeconds(3)
             return
         }
         $mon.rescuedFor = $mon.lastWin
@@ -381,20 +517,20 @@ function Invoke-MonitorSync {
     # A freshly booted WSLg logs a 0x0 placeholder monitor before msrdc connects: not a real layout.
     if ($script:wslgLayout -match '(^| )-?\d+,-?\d+,0,0($| )') { return }
     # Woke from a long idle: rebuild the windows once things have settled, so they open again (FIX-017).
-    if ($script:wokeAt -and ((Get-Date) - $script:wokeAt).TotalSeconds -ge $WakeSettleSec) {
-        if (((Get-Date) - $mon.lastRestart).TotalSeconds -lt $CooldownSec) { $script:wokeAt = $null; return }
+    if ($script:wokeAt -and ((Get-Now) - $script:wokeAt).TotalSeconds -ge $WakeSettleSec) {
+        if (((Get-Now) - $mon.lastRestart).TotalSeconds -lt $CooldownSec) { $script:wokeAt = $null; return }
         if (-not (Test-SafeToRestartMsrdc)) { return }
         Write-Log ("monitors: woke after {0} min idle -> restarting msrdc so Linux windows open again" -f [int]($script:wokeIdle / 60))
         Get-Process msrdc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        $mon.lastRestart = Get-Date; $script:wokeAt = $null; $script:liveChange = $false
+        $mon.lastRestart = Get-Now; $script:wokeAt = $null; $script:liveChange = $false
         return
     }
     if ($script:wslgLayout -and $script:wslgLayout -eq $win -and $script:liveChange) {
-        if (((Get-Date) - $mon.lastRestart).TotalSeconds -lt $CooldownSec) { return }
+        if (((Get-Now) - $mon.lastRestart).TotalSeconds -lt $CooldownSec) { return }
         if (-not (Test-SafeToRestartMsrdc)) { return }
         Write-Log "monitors: live layout change to [$win] -> restarting msrdc to rebuild Linux windows"
         Get-Process msrdc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        $mon.lastRestart = Get-Date; $script:liveChange = $false
+        $mon.lastRestart = Get-Now; $script:liveChange = $false
         return
     }
     if (-not $script:wslgLayout -or $script:wslgLayout -eq $win) { $mon.tries = 0; $mon.triesKey = $null; return }
@@ -402,12 +538,12 @@ function Invoke-MonitorSync {
     $key = "$win => $($script:wslgLayout)"
     if ($key -ne $mon.triesKey) { $mon.triesKey = $key; $mon.tries = 0 }
     if ($mon.tries -ge $MaxTries) { return }
-    if (((Get-Date) - $mon.lastRestart).TotalSeconds -lt $CooldownSec) { return }
+    if (((Get-Now) - $mon.lastRestart).TotalSeconds -lt $CooldownSec) { return }
     if (-not (Test-SafeToRestartMsrdc)) { return }
 
     Write-Log "monitors: Windows[$win] WSLg[$($script:wslgLayout)] -> restarting msrdc (try $($mon.tries + 1))"
     Get-Process msrdc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    $mon.lastRestart = Get-Date; $mon.tries++
+    $mon.lastRestart = Get-Now; $mon.tries++
     if ($mon.tries -eq $MaxTries) { Write-Log 'monitors: giving up on this mismatch until the layout changes' }
 }
 
@@ -442,8 +578,9 @@ function Send-ImageToLinux($img) {
     $psi.Arguments = "-d $Distro --exec sh -c ""exec wl-copy --type image/png < \""`$(wslpath -u \""`$1\"")\"" >/dev/null 2>&1"" sh ""$TmpPng"""
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
     $p = [Diagnostics.Process]::Start($psi)
-    if (-not $p.WaitForExit(10000)) { try { $p.Kill() } catch {}; return $false }
-    $p.ExitCode -eq 0
+    if (-not $p.WaitForExit(10000)) { try { $p.Kill() } catch {}; return 'wsl.exe did not answer within 10 s (leaked relays? FIX-030)' }
+    if ($p.ExitCode -ne 0) { return "wl-copy failed, exit $($p.ExitCode) (is wl-clipboard installed in the distro?)" }
+    ''
 }
 
 # Copy in Linux, paste in Outlook (or any Windows app that asks for HTML first) pasted nothing: WSLg
@@ -494,21 +631,22 @@ function Invoke-ClipboardTick($msrdc) {
     # counts after the grace period and once focus has stayed on a Windows app for $LeaveMs.
     if ($fgLinux) { $clip.outSince = $null }
     elseif ($clip.inLinux) {
-        if (-not $clip.outSince) { $clip.outSince = Get-Date }
-        if ((Get-Date) -lt $clip.graceUntil -or ((Get-Date) - $clip.outSince).TotalMilliseconds -lt $LeaveMs) { return }
+        if (-not $clip.outSince) { $clip.outSince = Get-Now }
+        if ((Get-Now) -lt $clip.graceUntil -or ((Get-Now) - $clip.outSince).TotalMilliseconds -lt $LeaveMs) { return }
     }
     if ($fgLinux -and -not $clip.inLinux) {
         $clip.inLinux = $true
         if ($clip.pending -and (Test-DistroUp)) {
             $img = $clip.pending; $clip.pending = $null
-            if (Send-ImageToLinux $img) {
+            $why = Send-ImageToLinux $img
+            if (-not $why) {
                 Start-Sleep -Milliseconds $SettleMs
                 $clip.handedSeq = [WH]::GetClipboardSequenceNumber(); $clip.seenSeq = $clip.handedSeq
                 if ($clip.handed) { $clip.handed.Dispose() }
                 $clip.handed = $img
-                $clip.graceUntil = (Get-Date).AddMilliseconds($GraceMs)
+                $clip.graceUntil = (Get-Now).AddMilliseconds($GraceMs)
                 Write-Log "clipboard: handed image ($($img.Width)x$($img.Height)) to Linux as PNG"
-            } else { $img.Dispose(); Write-Log 'clipboard: wl-copy failed (is wl-clipboard installed in the distro?)' }
+            } else { $img.Dispose(); Write-Log "clipboard: image not handed to Linux - $why" }
         }
     } elseif (-not $fgLinux -and $clip.inLinux) {
         $clip.inLinux = $false
@@ -535,7 +673,11 @@ if ($Status) {
     Write-Output ("msrdc:   " + ((Get-MsrdcPids) -join ', '))
     Write-Output ("Off-screen Linux windows: " + [WH]::StrandedTitles([uint32[]](Get-MsrdcPids)))
     Write-Output ("Minimized Linux windows:  " + [WH]::MinimizedTitles([uint32[]](Get-MsrdcPids)))
-    Write-Output ("Keep-alive sessions:      " + @(Get-CimInstance Win32_Process -Filter "Name='wsl.exe'" | Where-Object { $_.CommandLine -like '*exec sleep infinity*' }).Count)
+    # A keep-alive is a wsl.exe with a wsl.exe child of the same command line: count the roots only.
+    $ka = @(Get-CimInstance Win32_Process -Filter "Name='wsl.exe'" | Where-Object { $_.CommandLine -like '*exec sleep infinity*' })
+    $kaIds = @($ka | ForEach-Object { $_.ProcessId })
+    Write-Output ("Keep-alive sessions:      " + @($ka | Where-Object { $kaIds -notcontains $_.ParentProcessId }).Count)
+    Write-Output ("Restart after wake:       " + $(if ($WakeRestart) { 'on (helper-config.json wakeRestart)' } else { 'off' }))
     Write-Output ("Apartment: " + [Threading.Thread]::CurrentThread.ApartmentState)
     return
 }
@@ -546,6 +688,84 @@ if ($Rescue) {
     $n = [WH]::RescueStranded($pids)
     Write-Log "rescue: moved $n Linux window(s) onto the main screen: $left"
     Write-Output "Moved $n window(s): $left"
+    return
+}
+# Dev Control's "Fix Linux windows" button (FIX-022): restore minimized Linux windows, move off-screen
+# ones to the main screen, then restart msrdc so WSLg re-sends every window and the current monitor
+# layout. Last line: "CODEWINDOWS <n>" = Linux VS Code windows on screen afterwards.
+if ($Repair) {
+    if (-not (Test-DistroUp)) { Write-Output 'WSL is not running - no Linux windows to fix.'; Write-Output 'CODEWINDOWS -1'; return }
+    $pids = [uint32[]](Get-MsrdcPids)
+    if ($pids.Count) {
+        $n = [WH]::RestoreMinimized($pids)
+        if ($n) { Write-Log "repair: restored $n minimized Linux window(s)"; Write-Output "Restored $n minimized Linux window(s)."; Start-Sleep -Seconds 2 }
+        $left = [WH]::StrandedTitles($pids)
+        if ($left) {
+            $n = [WH]::RescueStranded($pids)
+            Write-Log "repair: moved $n Linux window(s) onto the main screen: $left"; Write-Output "Moved $n off-screen window(s) onto the main screen."
+            Start-Sleep -Seconds 2
+        }
+        $min = [WH]::MinimizedTitles($pids)
+        if (Test-MicInUse) {
+            Write-Log 'repair: NOT restarting msrdc - the microphone is in use (WSLg would crash)'
+            Write-Output 'Did not reconnect WSLg: the microphone is in use (dictation or a call) and reconnecting now would crash WSLg and close every Linux window. Try again when you have stopped recording (if WSLg just crashed, its audio needs about 2 minutes to come back).'
+        } elseif ($min) {
+            Write-Log "repair: NOT restarting msrdc - window(s) still minimized: $min"
+            Write-Output "Did not reconnect WSLg: these windows would not restore and would be lost: $min"
+        } else {
+            # Same rule as Test-SafeToRestartMsrdc: let a msrdc that just (re)connected finish first (FIX-025).
+            $young = @(Get-Process msrdc -ErrorAction SilentlyContinue | ForEach-Object { try { ((Get-Date) - $_.StartTime).TotalSeconds } catch { 999 } } | Where-Object { $_ -lt $YoungMsrdcSec })
+            if ($young.Count) { Start-Sleep -Seconds ([int]($YoungMsrdcSec - ($young | Measure-Object -Minimum).Minimum) + 1) }
+            $before = [WH]::CountTitled($pids, '')
+            Get-Process msrdc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Write-Log 'repair: restarted msrdc (Dev Control Fix Linux windows)'
+            Write-Output 'Reconnected WSLg (msrdc): windows and monitor layout re-sent.'
+            # WSLGd relaunches msrdc within seconds; the windows follow 5-15 s later (if the reconnect crashes
+            # Weston - "unable to checkDescriptor", about 1 in 8 - Invoke-CodeRecovery reopens VS Code ~20 s later). Wait until as many
+            # are back as were on screen before (or 35 s), so the VS Code count below is not taken too early.
+            $new = [uint32[]]@()
+            for ($i = 0; $i -lt 35; $i++) {
+                Start-Sleep -Seconds 1
+                $new = [uint32[]]@(Get-Process msrdc -ErrorAction SilentlyContinue | Where-Object { $pids -notcontains [uint32]$_.Id } | ForEach-Object { [uint32]$_.Id })
+                if ($new.Count -and [WH]::CountTitled($new, '') -ge [Math]::Max(1, $before)) { break }
+            }
+            Start-Sleep -Seconds 2
+        }
+    } else { Write-Output 'WSLg is not connected right now (no msrdc) - it reconnects by itself; try again in a few seconds.' }
+    $script:msrdcAt = [datetime]::MinValue
+    Write-Output ('CODEWINDOWS ' + [WH]::CountTitled([uint32[]](Get-MsrdcPids), 'Visual Studio Code'))
+    return
+}
+# Dev Control's "Fix WSL" button (FIX-030): end leaked relays now (older than 60 s, not 5 min) and say whether
+# WSL answers new calls again. Last line: "RELAYS <n>" = how many ended, -1 = WSL did not answer.
+if ($Reap) {
+    if (-not (Test-DistroUp)) { Write-Output 'WSL is not running - nothing to fix.'; Write-Output 'RELAYS -1'; return }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $p = Start-ReapProcess 60
+    if (-not $p.WaitForExit(90000)) {
+        try { $p.Kill() } catch {}
+        # Count the relays over 9p, which still answers while new sessions hang: many = they are the likely
+        # cause; few = something else is stuck and only a WSL restart helps.
+        $proc = "\\wsl.localhost\$Distro\proc"
+        $count = @(Get-ChildItem $proc -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d+$' } |
+                   Where-Object { try { (Get-Content "$($_.FullName)\comm" -ErrorAction Stop) -eq 'Relay' } catch { $false } }).Count
+        Write-Log "relays: Fix WSL - WSL did not answer within 90 s; $count relay(s) in the distro (FIX-030)"
+        Write-Output "WSL is not accepting new connections right now, so the cleanup could not run from Windows ($count stuck relay process(es) in Linux)."
+        if ($count -ge 20) {
+            Write-Output 'In a Linux terminal that is already open, run:  for p in $(ps -eo pid=,ppid=,etimes=,comm= | awk ''$4=="Relay" && $2==1 && $3>60 {print $1}''); do [ -z "$(ps -o pid= --ppid $p)" ] && sudo kill -KILL $p; done'
+            Write-Output 'If that does not help, Stop WSL and start it again.'
+        } else {
+            Write-Output 'That is too few to be the cause. Wait a minute and try again; if it keeps failing, Stop WSL and start it again.'
+        }
+        Write-Output 'RELAYS -1'
+        return
+    }
+    $n = 0; [void][int]::TryParse($p.StandardOutput.ReadToEnd().Trim(), [ref]$n)
+    if ($p.ExitCode -ne 0) { Write-Output "The cleanup failed (wsl.exe exit $($p.ExitCode))."; Write-Output 'RELAYS -1'; return }
+    $slow = if ($sw.Elapsed.TotalSeconds -ge 10) { " WSL took $([int]$sw.Elapsed.TotalSeconds) s to answer - try again in a minute if pasting or explorer.exe still fail." } else { '' }
+    Write-Log "relays: Fix WSL - ended $n leaked WSL relay process(es) ($([int]$sw.Elapsed.TotalMilliseconds) ms, FIX-030)"
+    Write-Output $(if ($n -gt 0) { "Ended $n stuck WSL relay process(es); new WSL calls (screenshot paste, explorer.exe, clip.exe) should work again.$slow" } else { "No stuck WSL relays found - WSL answers normally.$slow" })
+    Write-Output "RELAYS $n"
     return
 }
 
@@ -564,12 +784,19 @@ if (-not (Test-DistroUp)) {
     exit 0
 }
 Write-Log "started (distro $Distro)"
-$downCheck = Get-Date
+$downCheck = Get-Now
+# Away = the session was locked or the PC slept since WSLg went idle (the FIX-017 wake rule needs it).
+# Asleep shows as a gap between passes, in wall-clock or monotonic time (either may skip the sleep).
+$script:awaySeen = $false; $lastWall = Get-Date; $lastMono = Get-Now
 while ($true) {
     Start-Sleep -Milliseconds $TickMs
     try {
-        if ((Get-Date) -ge $downCheck) {
-            $downCheck = (Get-Date).AddSeconds(2)
+        if ((Get-Now) -ge $downCheck) {
+            $downCheck = (Get-Now).AddSeconds(2)
+            $wall = Get-Date; $mono = Get-Now
+            if (($wall - $lastWall).TotalSeconds -gt 60 -or ($mono - $lastMono).TotalSeconds -gt 60) { $script:awaySeen = $true }
+            $lastWall = $wall; $lastMono = $mono
+            if (Get-Process LogonUI -ErrorAction SilentlyContinue) { $script:awaySeen = $true }
             $m = Get-Item $StopMarker -ErrorAction SilentlyContinue
             $stopping = $m -and ((Get-Date) - $m.LastWriteTime).TotalSeconds -lt 120
             if ($stopping -or -not (Get-Process vmmemWSL -ErrorAction SilentlyContinue)) {
@@ -581,7 +808,8 @@ while ($true) {
         $msrdc = Get-MsrdcPids
         if ($msrdc.Count -eq 0) { $clip.inLinux = $false; continue }
         Invoke-ClipboardTick $msrdc
-        if ((Get-Date) -ge $mon.next) { $mon.next = (Get-Date).AddSeconds($MonitorEverySec); Update-CodeSeen; Invoke-MonitorSync; Invoke-CodeRecovery }
+        if ((Get-Now) -ge $mon.next) { $mon.next = (Get-Now).AddSeconds($MonitorEverySec); Update-CodeSeen; Invoke-MonitorSync; Invoke-CodeRecovery }
         Invoke-KeepAliveCheck
+        Invoke-RelayReap
     } catch { Write-Log "error: $($_.Exception.Message)" }
 }
