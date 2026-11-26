@@ -20,7 +20,7 @@ fi
 
 # Whole words, case-sensitive (a short word like "AB" must not hit "mkdir"). The repo's own public
 # names are removed first, so private words inside them don't count.
-allow='s/WSL-Windows-KD-Custom-Setup//g; s/KD Dev Tools//g'
+allow='s/WSL-Windows-KD-Custom-Setup//g; s/WSL Windows KD Custom Setup//g; s/KD Dev Tools//g'
 words="$(git rev-parse --git-dir)/private-words"
 if [ -f "$words" ]; then
     hits=$(git diff --cached -U0 -- . "$self" | grep -E '^\+' | sed "$allow" | grep -w -F -f "$words")
