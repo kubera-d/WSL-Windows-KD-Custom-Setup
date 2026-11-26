@@ -26,7 +26,10 @@ param(
     # Create (or reuse) the 'CN=KD Dev Tools' code-signing certificate, trust it for this user, sign the exe.
     [switch]$Sign,
     # Do not create the Desktop shortcut (the Start Menu shortcut is always created).
-    [switch]$NoDesktopShortcut
+    [switch]$NoDesktopShortcut,
+    # Start Dev Control minimized to the tray at Windows sign-in (Startup folder shortcut), so the cleaner always
+    # runs. Remove: delete '<Startup>\Dev Control.lnk'.
+    [switch]$StartAtSignIn
 )
 $ErrorActionPreference = 'Stop'
 $repo = $PSScriptRoot
@@ -88,10 +91,11 @@ function Get-RunningDevControl([string]$Dir) {
         Where-Object { $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($script) })
 }
 
-function New-Shortcut([string]$Path, [string]$Target, [string]$WorkDir, [string]$Icon) {
+function New-Shortcut([string]$Path, [string]$Target, [string]$WorkDir, [string]$Icon, [string]$Arguments = '') {
     $shell = New-Object -ComObject WScript.Shell
     $lnk = $shell.CreateShortcut($Path)
     $lnk.TargetPath = $Target
+    $lnk.Arguments = $Arguments
     $lnk.WorkingDirectory = $WorkDir
     if (Test-Path $Icon) { $lnk.IconLocation = "$Icon,0" }
     $lnk.Description = 'Dev Control - manage WSL2, Docker Compose projects and containers'
@@ -205,6 +209,9 @@ $ico = Join-Path $Destination 'DevControl.ico'
 New-Shortcut (Join-Path ([Environment]::GetFolderPath('Programs')) 'Dev Control.lnk') $exe $Destination $ico
 if (-not $NoDesktopShortcut) {
     New-Shortcut (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Dev Control.lnk') $exe $Destination $ico
+}
+if ($StartAtSignIn) {
+    New-Shortcut (Join-Path ([Environment]::GetFolderPath('Startup')) 'Dev Control.lnk') $exe $Destination $ico '-Minimized'
 }
 
 # ---------------------------------------------------------------- summary

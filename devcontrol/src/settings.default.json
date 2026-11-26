@@ -10,6 +10,16 @@
   "closeToTray": false,
   "keepAlive": true,
   "statusRefreshSeconds": 3,
+  "wslQuerySeconds": 30,
   "containerRefreshSeconds": 10,
-  "projectRefreshSeconds": 30
+  "projectRefreshSeconds": 30,
+  "cleanerEnabled": true,
+  "cleanerIdleHours": 4,
+  "cleanerCheckMinutes": 10,
+  "cleanerDryRun": false,
+  "cleanerChromePort": 9222,
+  "cleanerKeepPorts": [],
+  "cleanerKeepTabs": [],
+  "cleanerServerPrograms": ["node", "workerd", "python", "pythonw", "bun", "deno", "php", "ruby"],
+  "kernelPoolWarnGB": 6
 }

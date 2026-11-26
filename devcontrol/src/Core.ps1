@@ -51,8 +51,18 @@ function Get-DcSettings {
         closeToTray             = $false
         keepAlive               = $true
         statusRefreshSeconds    = 3
+        wslQuerySeconds         = 30            # with the WSL VM up, how often the status poll runs wsl.exe
         containerRefreshSeconds = 10
         projectRefreshSeconds   = 30
+        cleanerEnabled          = $true         # stop stale dev servers / leftover browsers, close leftover tabs
+        cleanerIdleHours        = 4
+        cleanerCheckMinutes     = 10
+        cleanerDryRun           = $false        # true = only log what it would do
+        cleanerChromePort       = 9222          # the automation Chrome whose leftover tabs it closes
+        cleanerKeepPorts        = @()           # listening ports never stopped
+        cleanerKeepTabs         = @()           # URL patterns (-like) never closed
+        cleanerServerPrograms   = @('node', 'workerd', 'python', 'pythonw', 'bun', 'deno', 'php', 'ruby')
+        kernelPoolWarnGB        = 6             # one tray warning per Windows start above this; 0 = off
     }
     $path = Join-Path $script:DcAppDir 'settings.json'
     if (Test-Path $path) {
@@ -158,6 +168,9 @@ function Get-DcWslMemory {
     if ($p) { [int64]$p.WorkingSet64 } else { [int64]0 }
 }
 
+# True while the WSL VM runs. No VM = no distro running, known without starting wsl.exe (FIX-033).
+function Test-DcWslVm { [bool](Get-Process -Name 'vmmemWSL' -ErrorAction SilentlyContinue) }
+
 function ConvertTo-DcNormalizedConfig([string]$Text) {
     $lines = $Text -split "`r?`n" | ForEach-Object { $_.Trim() } |
         Where-Object { $_ -and -not $_.StartsWith('#') -and -not $_.StartsWith(';') } |
@@ -201,12 +214,18 @@ function Find-DcKeepAlive {
         Where-Object { $_.CommandLine -like '*exec sleep infinity*' })
 }
 
-function Get-DcStatus {
-    $running = Test-DcWslRunning
+# The background status check. wsl.exe runs only while the WSL VM is up and $Query is set (the UI asks every
+# wslQuerySeconds, and on every poll until the distro reports running); without the VM, Running is $false
+# with no process started; VM up but not asked: Running = $null (unchanged). FIX-033.
+function Get-DcStatus([bool]$Query = $true) {
+    $vm = Test-DcWslVm
+    $asked = ($env:DEVCONTROL_FAKE_STOPPED -eq '1') -or ($vm -and $Query)
+    $running = if ($asked) { Test-DcWslRunning } elseif ($vm) { $null } else { $false }
     $mode = Get-DcCurrentMode
     [pscustomobject]@{
         Running        = $running
-        MemoryBytes    = if ($running) { Get-DcWslMemory } else { [int64]0 }
+        Queried        = $asked
+        MemoryBytes    = if ($running -ne $false -and $vm) { Get-DcWslMemory } else { [int64]0 }
         Mode           = $mode.Mode
         ModeMemory     = $mode.Memory
         ModeProcessors = $mode.Processors
@@ -388,28 +407,49 @@ Start-Service hns
 }
 
 # Last resort (asks for admin rights via UAC): end the WSL VM through the Host Compute Service
-# (hcsdiag kill), then end wslservice.exe if the VM is still there. Task Manager cannot end
-# vmmemWSL - the hypervisor owns it. Unsaved work in Linux is lost.
+# (hcsdiag kill), then restart wslservice.exe if the VM is still there OR wsl.exe does not answer:
+# a `wsl --shutdown --force` that never returns can leave the service hung with no VM at all - every
+# wsl.exe call then waits forever, so WSL can neither stop nor start (FIX-032). Task Manager cannot
+# end vmmemWSL - the hypervisor owns it. Unsaved work in Linux is lost.
 function Stop-DcWslForce {
     Set-DcStopMarker
     $script = Join-Path $script:DcDataDir 'force-stop-wsl.ps1'
-    @'
+    $out = Join-Path $script:DcDataDir 'force-stop-wsl.log'
+    ('$ErrorActionPreference = ''Continue''' + "`r`n" + '& {' + @'
+
 $ids = @(& hcsdiag.exe list 2>$null | ForEach-Object { if ($_ -match '([0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27}).*\bWSL\s*$') { $Matches[1] } })
-foreach ($id in $ids) { & hcsdiag.exe kill $id }
+foreach ($id in $ids) { & hcsdiag.exe kill $id | Out-Null; "killed WSL VM $id" }
 Start-Sleep -Seconds 5
-if (Get-Process -Name vmmemWSL -ErrorAction SilentlyContinue) {
+$q = Start-Process -FilePath 'wsl.exe' -ArgumentList '--list --quiet' -WindowStyle Hidden -PassThru
+$hung = -not $q.WaitForExit(15000)
+if ($hung) { try { $q.Kill() } catch { } }
+$vm = [bool](Get-Process -Name vmmemWSL -ErrorAction SilentlyContinue)
+if ($hung -or $vm) {
     Stop-Process -Name wslservice -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Start-Service WSLService -ErrorAction SilentlyContinue
+    'restarted the WSL service (' + $(if ($hung) { 'wsl.exe did not answer' } else { 'VM still there' }) + ')'
 }
-'@ + $script:DcHnsCleanup | Set-Content -Path $script -Encoding ASCII
-    Write-DcCallLog 'FORCE' 'hcsdiag kill <WSL VM> / Stop-Process wslservice (elevated)'
+'@ + $script:DcHnsCleanup + @'
+
+} *>&1 | Out-File -FilePath $args[0] -Encoding ASCII
+'@) | Set-Content -Path $script -Encoding ASCII
+    Remove-Item -Force -ErrorAction SilentlyContinue $out
+    Write-DcCallLog 'FORCE' 'hcsdiag kill <WSL VM> / restart wslservice if VM left or hung / HNS cleanup (elevated)'
     try {
         $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -PassThru `
-            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$script`""
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$script`" `"$out`""
     } catch { throw "Force stop cancelled ($($_.Exception.Message))" }
-    [void]$p.WaitForExit(60000)
-    if (-not (Wait-DcWslDown 30)) { throw 'WSL is still running after the force stop. Restart Windows (Start > Power > Restart) - a normal restart works, no need to hold the power button.' }
+    [void]$p.WaitForExit(90000)
+    $lines = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue | Where-Object { "$_".Trim() })
+    if ($lines.Count) { Write-DcLog ('Force stop: ' + ($lines -join '; ')) }
+    $script:DcWslHung = $false
+    if (-not (Wait-DcWslDown 30)) {
+        if ($script:DcWslHung) { throw 'WSL still does not answer after the force stop restarted its service. Restart Windows (Start > Power > Restart).' }
+        throw 'WSL is still running after the force stop. Restart Windows (Start > Power > Restart) - a normal restart works, no need to hold the power button.'
+    }
     Write-DcLog 'WSL force-stopped'
-    'WSL force-stopped.'
+    'WSL force-stopped.' + $(if (@($lines -match '^restarted the WSL service').Count) { ' The WSL service was restarted.' } else { '' })
 }
 
 # The ONLY function that boots WSL on purpose.
@@ -417,6 +457,9 @@ function Start-DcWslBoot {
     $s = Get-DcSettings
     $msgs = @()
     Remove-Item -Force -ErrorAction SilentlyContinue $script:DcStopMarker
+    # A hung WSL service (FIX-032) makes every wsl.exe wait forever, the boot included. Say so instead of a bare
+    # timeout: the UI offers the force stop on 'WSL is not responding', and that restarts the service.
+    try { [void](Test-DcWslRunning) } catch { throw "WSL is not responding ($($_.Exception.Message))." }
     if ($s.keepAlive) {
         # A long-lived hidden wsl.exe session keeps the distro from idling out after
         # the last terminal/VS Code window closes. wsl --shutdown ends it.
@@ -481,7 +524,8 @@ function Get-DcLinuxInfo {
 
 # EVERY folder under projectsRoot is a project (new folders are picked up on the next refresh;
 # projects.json only adds metadata - group, mode, tools, hidden - it is not a list of what exists).
-# Exception: entries with a "path" are listed from that folder (outside projectsRoot, Windows paths via /mnt).
+# Exception: entries with a "path" are listed from that folder (outside projectsRoot). A Linux path is
+# read in Linux; a Windows path is read on Windows (Get-DcWindowsProjects), never through /mnt.
 # Reports the compose file (in the folder, or in its configured composeDir), git-worktree details
 # and last activity so the UI can classify them.
 function Get-DcProjects {
@@ -490,8 +534,10 @@ function Get-DcProjects {
     $cfgLines = @($cfg.Keys | ForEach-Object {
         $sub = if ($cfg[$_].PSObject.Properties['composeDir']) { [string]$cfg[$_].composeDir } else { '' }
         $pp = Get-DcProjectPath $_ $cfg
+        # ':win' = listed on the Windows side: Linux skips the name (it is never a directory there)
+        $lp = if (Test-DcWindowsPath $pp) { ':win' } elseif ($pp) { ConvertTo-DcLinuxPath $pp } else { '' }
         # 0x1f, not tab: read collapses runs of IFS whitespace, so an empty composeDir would eat the path
-        $_ + [char]0x1f + $sub + [char]0x1f + $(if ($pp) { ConvertTo-DcLinuxPath $pp })
+        $_ + [char]0x1f + $sub + [char]0x1f + $lp
     }) -join "`n"
     $script = @'
 root=__ROOT__
@@ -536,7 +582,7 @@ printf 'J\t'; docker compose ls --all --format json 2>/dev/null | tr -d '\n'; ec
             foreach ($cf in ($c.ConfigFiles -split ',')) { $status[($cf.Trim() -replace '/[^/]+$', '')] = $c.Status }
         }
     }
-    @($lines | Where-Object { $_.StartsWith("P`t") } | ForEach-Object {
+    $linux = @($lines | Where-Object { $_.StartsWith("P`t") } | ForEach-Object {
         $f = $_.Split("`t")
         [pscustomobject]@{
             Name        = $f[1]
@@ -553,8 +599,114 @@ printf 'J\t'; docker compose ls --all --format json 2>/dev/null | tr -d '\n'; ec
             LastActive  = if ($f[10]) { [int64]$f[10] } else { [int64]0 }
             Status      = if (-not $f[3]) { 'no compose file' } elseif ($status[$f[2]]) { $status[$f[2]] } else { 'down' }
         }
-    } | Sort-Object Name)
+    })
+    @(@($linux) + @(Get-DcWindowsProjects $cfg $status) | Sort-Object Name)
 }
+
+# Newest file mtime (unix seconds) up to 3 levels down, skipping dependency and git folders: the
+# Windows twin of the Linux `find -maxdepth 3` fallback for folders without git.
+function Get-DcNewestFileTime([string]$Dir) {
+    $best = [datetime]::MinValue
+    $level = @($Dir)
+    for ($depth = 0; $depth -lt 3 -and $level.Count; $depth++) {
+        $next = @()
+        foreach ($d in $level) {
+            try { $items = [IO.Directory]::GetFileSystemEntries($d) } catch { continue }
+            foreach ($i in $items) {
+                $leaf = [IO.Path]::GetFileName($i)
+                if ([IO.Directory]::Exists($i)) {
+                    if ($leaf -notin @('node_modules', '.venv', '.git')) { $next += $i }
+                } else {
+                    $t = [IO.File]::GetLastWriteTimeUtc($i)
+                    if ($t -gt $best) { $best = $t }
+                }
+            }
+        }
+        $level = $next
+    }
+    if ($best -eq [datetime]::MinValue) { return [int64]0 }
+    [int64]([DateTimeOffset]$best).ToUnixTimeSeconds()
+}
+
+# Projects whose projects.json "path" is a Windows path, read on Windows (git.exe and the file system)
+# so they list while WSL is stopped and a refresh never crosses the /mnt bridge. Same object shape as
+# Get-DcProjects; Dir / ComposeDir / ComposeFile are the Linux (/mnt) form, which is what a compose run
+# and the container list use. $ComposeStatus: compose dir -> status, from the Linux listing (if any).
+function Get-DcWindowsProjects($Config = $null, $ComposeStatus = @{}) {
+    if ($null -eq $Config) { $Config = Get-DcProjectConfig }
+    if ($null -eq $ComposeStatus) { $ComposeStatus = @{} }
+    $git = Get-Command 'git.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $gitExe = if ($git) { $git.Source } else { '' }
+    $runGit = {
+        param([string]$Dir, [string]$GitArgs)
+        if (-not $gitExe) { return '' }
+        try {
+            $r = Invoke-DcProcess $gitExe ("-C `"$Dir`" " + $GitArgs) 20
+            if ($r.ExitCode -eq 0) { return ([string]$r.Out).Trim() }
+        } catch { }
+        ''
+    }
+    $out = @()
+    foreach ($n in @($Config.Keys)) {
+        $pp = Get-DcProjectPath $n $Config
+        if (-not (Test-DcWindowsPath $pp)) { continue }
+        $d = $pp.TrimEnd('\', '/')
+        if ($d -match '^[A-Za-z]:$') { $d += '\' }
+        if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
+        $e = $Config[$n]
+        $sub = if ($e.PSObject.Properties['composeDir']) { ([string]$e.composeDir).Trim('/', '\') } else { '' }
+        $cdW = if ($sub) { Join-Path $d $sub } else { $d }
+        $cfW = ''
+        foreach ($f in $script:DcComposeFiles) { $c = Join-Path $cdW $f; if (Test-Path -LiteralPath $c -PathType Leaf) { $cfW = $c; break } }
+        $cname = ''
+        if ($cfW) {
+            $m = Select-String -LiteralPath $cfW -Pattern '^name:\s*["'']?([^"''\s]+)' | Select-Object -First 1
+            $cname = if ($m) { $m.Matches[0].Groups[1].Value } else { ((Split-Path $cdW -Leaf).ToLower() -replace '[^a-z0-9_-]', '') }
+        }
+        $wt = $false; $parent = ''; $br = ''; $dirty = 0; $ahead = 0; $last = [int64]0
+        $dotGit = Join-Path $d '.git'
+        if (Test-Path -LiteralPath $dotGit -PathType Leaf) {
+            $gd = ''
+            try { $gd = ([string](Get-Content -LiteralPath $dotGit -TotalCount 1)) -replace '^gitdir:\s*', '' } catch { }
+            $gdN = $gd.Replace('\', '/')
+            $i = $gdN.IndexOf('/.git/worktrees/')
+            if ($i -gt 0) {
+                $pdir = $gdN.Substring(0, $i)
+                $wt = $true; $parent = Split-Path $pdir -Leaf
+                $pb = & $runGit $pdir 'symbolic-ref --short HEAD'
+                $br = & $runGit $d 'branch --show-current'
+                $st = & $runGit $d 'status --porcelain'
+                $dirty = @($st -split "`r?`n" | Where-Object { $_ }).Count
+                if ($pb) { $a = & $runGit $d "rev-list --count $pb..HEAD"; if ($a -match '^\d+$') { $ahead = [int]$a } }
+            }
+        }
+        if (Test-Path -LiteralPath $dotGit) {
+            $ct = & $runGit $d 'log -1 --format=%ct'
+            if ($ct -match '^\d+$') { $last = [int64]$ct }
+        }
+        if (-not $last) { $last = Get-DcNewestFileTime $d }
+        $cdL = ConvertTo-DcLinuxPath $cdW
+        $out += [pscustomobject]@{
+            Name        = $n
+            Dir         = ConvertTo-DcLinuxPath $d
+            ComposeDir  = $cdL
+            ComposeFile = if ($cfW) { ConvertTo-DcLinuxPath $cfW } else { '' }
+            Compose     = [bool]$cfW
+            ComposeName = $cname
+            Worktree    = $wt
+            Parent      = $parent
+            Branch      = $br
+            Dirty       = $dirty
+            Ahead       = $ahead
+            LastActive  = $last
+            Status      = if (-not $cfW) { 'no compose file' } elseif ($ComposeStatus[$cdL]) { $ComposeStatus[$cdL] } else { 'down' }
+        }
+    }
+    $out   # callers wrap in @()
+}
+
+# Is this project's folder a Windows path (projects.json "path")?
+function Test-DcWindowsProject([string]$Project, $Config = $null) { Test-DcWindowsPath (Get-DcProjectPath $Project $Config) }
 
 function Save-DcProjectCache($Projects) {
     try { ConvertTo-Json -InputObject @($Projects) | Set-Content -Path (Join-Path $script:DcDataDir 'projects-cache.json') -Encoding UTF8 } catch { }
@@ -1030,4 +1182,437 @@ function Format-DcBytes([int64]$b) {
     if ($b -le 0) { return '-' }
     if ($b -ge 1GB) { return ('{0:N1} GB' -f ($b / 1GB)) }
     '{0:N0} MB' -f ($b / 1MB)
+}
+
+# ---------------------------------------------------------------- cleaner: stale dev servers, leftover browsers and tabs
+# Cleaner.cs (started by the UI) records, without starting any process, which listening sockets had connections and
+# from which local program (cleaner-net.json), and the automation Chrome's tabs with who last changed each one
+# (cleaner-tabs.json). Invoke-DcCleanup reads them every cleanerCheckMinutes; after cleanerIdleHours it
+#  - stops a dev server (a cleanerServerPrograms process listening on a port, with the shell or program tree that
+#    started it) when it had no connection that long OR the Claude session that started it has been idle or gone that
+#    long - never while the user's own browser used it in that time or a tab the user navigated is on it;
+#  - stops a Playwright browser whose script is gone (pipe-driven, no parent: nothing can drive it any more);
+#  - closes a tab of the automation Chrome that automation left and nobody changed since (a tab the user navigated
+#    is the user's and is never closed), always leaving one tab open;
+#  - warns once per Windows start when the kernel pools pass kernelPoolWarnGB (a leaking driver): one warning,
+#    then quiet.
+# Stopping uses Stop-Process, closing a tab the DevTools HTTP endpoint; no process is started.
+
+$script:DcCleanerShells   = @('bash', 'sh', 'cmd', 'powershell', 'pwsh')
+$script:DcCleanerHosts    = @('explorer') + $script:DcCleanerShells   # an interactive shell or Explorer started it: the user
+$script:DcCleanerBrowsers = @('chrome', 'msedge', 'firefox', 'brave', 'chromium', 'chrome-headless-shell', 'headless_shell')
+
+function Initialize-DcCleanerTypes {
+    if (-not ('DevControl.Cleaner.Watch' -as [type])) {
+        Add-Type -Path (Join-Path $script:DcAppDir 'Cleaner.cs') -ReferencedAssemblies 'System.Web.Extensions'
+    }
+}
+
+function ConvertFrom-DcIso($Value) {
+    if ($null -eq $Value -or '' -eq $Value) { return $null }
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime() }
+    [DateTime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+}
+
+function Read-DcDataJson([string]$Name) {
+    $path = Join-Path $script:DcDataDir $Name
+    for ($i = 0; $i -lt 3; $i++) {
+        try { if (Test-Path $path) { return (Get-Content -Raw -Path $path -Encoding UTF8 | ConvertFrom-Json) } else { return $null } }
+        catch { Start-Sleep -Milliseconds 200 }
+    }
+    $null
+}
+
+function Format-DcAge([TimeSpan]$Span) {
+    if ($Span.TotalHours -ge 1) { '{0:N1} h' -f $Span.TotalHours } else { '{0:N0} min' -f $Span.TotalMinutes }
+}
+
+function Get-DcShort([string]$Text, [int]$Max) { if ($Text.Length -le $Max) { $Text } else { $Text.Substring(0, $Max - 3) + '...' } }
+
+# pid -> { Id, Parent, Name (lower case, no .exe), Cmd, Path, Start }
+function Get-DcProcSnapshot {
+    $byId = @{}
+    foreach ($p in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate, ExecutablePath -ErrorAction Stop)) {
+        $byId[[int]$p.ProcessId] = [pscustomobject]@{
+            Id = [int]$p.ProcessId; Parent = [int]$p.ParentProcessId
+            Name = [IO.Path]::GetFileNameWithoutExtension([string]$p.Name).ToLowerInvariant()
+            Cmd = [string]$p.CommandLine; Path = [string]$p.ExecutablePath; Start = $p.CreationDate
+        }
+    }
+    $byId
+}
+
+# The parent, if it still runs (a reused pid started after its "child" is not the parent).
+function Get-DcLiveParent($Procs, $P) {
+    $q = $Procs[$P.Parent]
+    if ($q -and $q.Id -ne $P.Id -and $q.Start -and $P.Start -and $q.Start -le $P.Start.AddSeconds(2)) { return $q }
+    $null
+}
+
+function Get-DcProcChildren($Procs) {
+    $kids = @{}
+    foreach ($p in $Procs.Values) {
+        $par = Get-DcLiveParent $Procs $p
+        if ($par) {
+            if (-not $kids.ContainsKey($par.Id)) { $kids[$par.Id] = New-Object System.Collections.ArrayList }
+            [void]$kids[$par.Id].Add($p)
+        }
+    }
+    $kids
+}
+
+# Root first, then its descendants (stopping the parent first keeps it from restarting a child, e.g. wrangler's workerd).
+function Get-DcProcTree($Kids, $Root) {
+    $out = New-Object System.Collections.ArrayList
+    $seen = @{}
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue($Root)
+    while ($queue.Count) {
+        $p = $queue.Dequeue()
+        if ($seen.ContainsKey($p.Id)) { continue }
+        $seen[$p.Id] = $true; [void]$out.Add($p)
+        if ($Kids.ContainsKey($p.Id)) { foreach ($k in $Kids[$p.Id]) { $queue.Enqueue($k) } }
+    }
+    , $out.ToArray()
+}
+
+function Stop-DcProcTree($Tree) {
+    $n = 0
+    foreach ($p in $Tree) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop; $n++ } catch { } }
+    $n
+}
+
+# A shell running a command or a script (bash -c / bash <file>, cmd /c, powershell -Command / -File / x.ps1), not
+# one the user types into (no arguments, bash --login -i, cmd /k, pwsh -NoLogo).
+function Test-DcScriptShell($P) {
+    if ($script:DcCleanerShells -notcontains $P.Name) { return $false }
+    $rest = $P.Cmd.Trim()
+    if ($rest.StartsWith('"')) { $i = $rest.IndexOf('"', 1); $rest = if ($i -gt 0) { $rest.Substring($i + 1) } else { '' } }
+    else { $i = $rest.IndexOf(' '); $rest = if ($i -gt 0) { $rest.Substring($i) } else { '' } }
+    $rest = $rest.Trim()
+    if (-not $rest) { return $false }
+    if ($P.Name -eq 'cmd') { return [bool]($rest -match '(?i)(^|\s)/c(\s|$)') }
+    if ($P.Name -eq 'bash' -or $P.Name -eq 'sh') {
+        return [bool](($rest -match '(^|\s)-[a-zA-Z]*c[a-zA-Z]*(\s|$)') -or @($rest -split '\s+' | Where-Object { $_ -and -not $_.StartsWith('-') }).Count)
+    }
+    [bool](($rest -match '(?i)(^|\s)-(c|command|f|file|e|ec|encodedcommand|noninteractive)(\s|$)') -or ($rest -match '(?i)\.ps1'))
+}
+
+# Text of what starts at Windows sign-in (Startup folders, Run keys), lower case with / for \. A server whose script
+# appears in it (a local tool started from the Startup folder) is a service the user relies on, never a stale dev server.
+function Get-DcAutostartText {
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($d in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
+        if (-not $d -or -not (Test-Path $d)) { continue }
+        foreach ($f in @(Get-ChildItem -Path $d -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(vbs|cmd|bat|ps1|js)$' })) {
+            try { [void]$parts.Add((Get-Content -Raw -Path $f.FullName)) } catch { }
+        }
+    }
+    foreach ($k in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run')) {
+        try { $v = Get-ItemProperty -Path $k -ErrorAction Stop; foreach ($p in $v.PSObject.Properties) { if ($p.Name -notlike 'PS*') { [void]$parts.Add([string]$p.Value) } } } catch { }
+    }
+    (($parts -join "`n").ToLowerInvariant()).Replace('\', '/')
+}
+
+# The script a node/python/... process runs (tools\server.mjs), lower case with /, or ''.
+function Get-DcScriptArg($P) {
+    if ($P.Cmd -match '(?i)\s"?([^\s"]+\.(mjs|cjs|js|ts|py))"?(\s|$)') { return $Matches[1].ToLowerInvariant().Replace('\', '/') }
+    ''
+}
+
+# Live Claude Code sessions (~/.claude/sessions/<pid>.json) by pid: Name, Busy, Since (last status change, UTC).
+function Get-DcClaudeSessions($Procs) {
+    $out = @{}
+    $dir = Join-Path $env:USERPROFILE '.claude\sessions'
+    foreach ($f in @(Get-ChildItem -Path $dir -Filter '*.json' -ErrorAction SilentlyContinue)) {
+        try { $j = Get-Content -Raw -Path $f.FullName | ConvertFrom-Json } catch { continue }
+        if (-not $j.pid) { continue }
+        $p = $Procs[[int]$j.pid]
+        if (-not $p) { continue }
+        if ($j.procStart -and $p.Start) {
+            $started = [DateTime]::FromFileTime([int64]$j.procStart)
+            if ([Math]::Abs(($started - $p.Start).TotalSeconds) -gt 5) { continue }   # the pid belongs to another process now
+        }
+        $ms = [Math]::Max([double]$j.updatedAt, [double]$j.statusUpdatedAt)
+        $out[[int]$j.pid] = [pscustomobject]@{
+            Pid = [int]$j.pid; Name = [string]$j.name; Busy = ([string]$j.status -eq 'busy')
+            Since = [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$ms).UtcDateTime
+        }
+    }
+    $out
+}
+
+# Walks up from a listening process through dev programs and script shells to the tree to stop (Root) and who
+# started it: Kind 'session' (a Claude session's Bash/PowerShell tool), 'orphan' (its starter is gone), 'user' (an
+# interactive shell or Explorer), or one never touched: 'session-direct' (started by the session itself, e.g. an MCP
+# server), 'session-self', 'app' (any other program, e.g. Adobe's node).
+function Get-DcProcOwner($Procs, $Sessions, $P, [string[]]$Programs) {
+    $cur = $P
+    $seen = @{}
+    while (-not $seen.ContainsKey($cur.Id)) {
+        $seen[$cur.Id] = $true
+        if ($Sessions.ContainsKey($cur.Id)) { return [pscustomobject]@{ Root = $null; Kind = 'session-self'; Session = $null; Via = '' } }
+        $par = Get-DcLiveParent $Procs $cur
+        if (-not $par) { return [pscustomobject]@{ Root = $cur; Kind = 'orphan'; Session = $null; Via = '' } }
+        if ($Sessions.ContainsKey($par.Id)) {
+            $kind = if ($script:DcCleanerShells -contains $cur.Name) { 'session' } else { 'session-direct' }
+            return [pscustomobject]@{ Root = $cur; Kind = $kind; Session = $Sessions[$par.Id]; Via = $par.Name }
+        }
+        if ($Programs -contains $par.Name -or (Test-DcScriptShell $par)) { $cur = $par; continue }
+        $kind = if ($script:DcCleanerHosts -contains $par.Name) { 'user' } else { 'app' }
+        return [pscustomobject]@{ Root = $cur; Kind = $kind; Session = $null; Via = $par.Name }
+    }
+    [pscustomobject]@{ Root = $null; Kind = 'loop'; Session = $null; Via = '' }
+}
+
+function Test-DcAutomationBrowser($P) {
+    ($P.Cmd -match '(?i)--remote-debugging-(port|pipe)|-juggler|--headless|playwright') -or ($P.Path -match '(?i)\\ms-playwright\\')
+}
+
+# A dev server's client counts as the user's own browser when it still runs, is a browser and its main process
+# was not started for automation (DevTools port or pipe, headless, Playwright's build or profile).
+function Test-DcUserBrowser($Procs, [int]$ClientPid, [string]$Name) {
+    $p = $Procs[$ClientPid]
+    if (-not $p -or $script:DcCleanerBrowsers -notcontains $p.Name -or ($Name -and $Name.ToLowerInvariant() -ne $p.Name)) { return $false }
+    for ($i = 0; $i -lt 8; $i++) { $par = Get-DcLiveParent $Procs $p; if ($par -and $par.Name -eq $p.Name) { $p = $par } else { break } }
+    -not (Test-DcAutomationBrowser $p)
+}
+
+function Get-DcOrphanAge($Orphans, $Seen, $P, [DateTime]$Now) {
+    $key = '{0}@{1}' -f $P.Id, $P.Start.ToUniversalTime().Ticks
+    $Seen[$key] = $true
+    if (-not $Orphans.ContainsKey($key) -or -not $Orphans[$key]) { $Orphans[$key] = $Now }
+    $Now - $Orphans[$key]
+}
+
+# One pass. -DryRun (or cleanerDryRun) only reports; -IdleHours overrides cleanerIdleHours; -Explain also lists
+# what was kept and why. Test hooks (tests/Test-Cleaner.ps1): -OnlyPorts limits dev servers to those ports and
+# -OnlyPids limits browsers to those pids (either one set = everything else is left alone). Returns
+# { Actions, Kept, Warn, DryRun }.
+function Invoke-DcCleanup([switch]$DryRun, [double]$IdleHours = -1, [switch]$Explain, [int[]]$OnlyPorts = @(), [int[]]$OnlyPids = @()) {
+    $limited = ($OnlyPorts.Count + $OnlyPids.Count) -gt 0
+    Initialize-DcCleanerTypes
+    $s = Get-DcSettings
+    if ($IdleHours -lt 0) { $IdleHours = [double]$s.cleanerIdleHours }
+    $dry = $DryRun -or [bool]$s.cleanerDryRun
+    $stopV = if ($dry) { 'Would stop' } else { 'Stopped' }
+    $closeV = if ($dry) { 'Would close' } else { 'Closed' }
+    $now = [DateTime]::UtcNow
+    $acts = New-Object System.Collections.ArrayList
+    $kept = New-Object System.Collections.ArrayList
+
+    $state = Read-DcDataJson 'cleaner-state.json'
+    $orphans = @{}
+    if ($state -and $state.orphans) { foreach ($o in $state.orphans.PSObject.Properties) { $orphans[$o.Name] = ConvertFrom-DcIso $o.Value } }
+    $warnedBoot = if ($state) { [string]$state.poolWarnedBoot } else { '' }
+    $seenOrphans = @{}
+    $warn = $null
+
+    $procs = Get-DcProcSnapshot
+    $kids = Get-DcProcChildren $procs
+    $sessions = Get-DcClaudeSessions $procs
+    $programs = @($s.cleanerServerPrograms | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $keepPorts = @($s.cleanerKeepPorts | ForEach-Object { [int]$_ })
+    $autostart = Get-DcAutostartText
+    $net = Read-DcDataJson 'cleaner-net.json'
+    $tabFile = Read-DcDataJson 'cleaner-tabs.json'
+    $tabs = @()
+    if ($tabFile -and $tabFile.tabs) {
+        $tabs = @($tabFile.tabs.PSObject.Properties | ForEach-Object {
+            $t = $_.Value
+            [pscustomobject]@{ Id = $_.Name; Url = [string]$t.url; Title = [string]$t.title; Owner = [string]$t.owner; Since = ConvertFrom-DcIso $t.since }
+        })
+    }
+
+    $listen = @{}   # pid -> listening ports
+    foreach ($r in @([DevControl.Cleaner.Net]::Rows())) {
+        if ($r.State -ne 2) { continue }
+        if (-not $listen.ContainsKey($r.Pid)) { $listen[$r.Pid] = New-Object 'System.Collections.Generic.HashSet[int]' }
+        [void]$listen[$r.Pid].Add($r.LocalPort)
+    }
+    $mainPort = [int]$s.cleanerChromePort
+
+    # ---- leftover automation browsers whose script is gone: Playwright's (pipe or playwright_ profile: nothing can
+    # drive them any more) and headless Chromes on their own DevTools port (once nothing connected for the idle time).
+    # Never the automation Chrome on cleanerChromePort, never a browser the user started.
+    foreach ($p in @($procs.Values)) {
+        if ($script:DcCleanerBrowsers -notcontains $p.Name -or $p.Cmd -match '--type=') { continue }
+        if ($limited -and $OnlyPids -notcontains $p.Id) { continue }
+        $ports = if ($listen.ContainsKey($p.Id)) { @($listen[$p.Id]) } else { @() }
+        if ($p.Cmd -match ('--remote-debugging-port={0}(\D|$)' -f $mainPort) -or $ports -contains $mainPort) { continue }
+        $pipe = $p.Cmd -match '(?i)--remote-debugging-pipe|-juggler-pipe|playwright_'
+        $portDriven = (-not $pipe) -and ($p.Cmd -match '--remote-debugging-port=') -and ($p.Cmd -match '--headless')
+        if (-not $pipe -and -not $portDriven) { continue }
+        if (Get-DcLiveParent $procs $p) { continue }
+        $age = Get-DcOrphanAge $orphans $seenOrphans $p $now
+        $label = '{0} browser pid {1}' -f $p.Name, $p.Id
+        if ($age.TotalHours -lt $IdleHours) {
+            if ($Explain) { [void]$kept.Add(('Keep {0}: its script ended {1} ago' -f $label, (Format-DcAge $age))) }
+            continue
+        }
+        $why = 'its script ended {0} ago' -f (Format-DcAge $age)
+        if ($portDriven) {
+            # something may still drive it over its port: it needs a watched, quiet port too
+            $quietOk = $false
+            if ($net -and $net.servers -and $ports.Count) {
+                $quietOk = $true
+                foreach ($port in $ports) {
+                    $e = $net.servers.PSObject.Properties[('{0}:{1}' -f $p.Id, $port)]
+                    if (-not $e) { $quietOk = $false; break }
+                    $first = ConvertFrom-DcIso $e.Value.firstSeen
+                    $t = ConvertFrom-DcIso $e.Value.lastActive
+                    if (-not $t) { $t = $first }
+                    if ((($now - $first).TotalHours -lt [Math]::Min($IdleHours, 1.0)) -or (($now - $t).TotalHours -lt $IdleHours)) { $quietOk = $false; break }
+                }
+            }
+            if (-not $quietOk) {
+                if ($Explain) { [void]$kept.Add(('Keep {0}: its DevTools port {1} was used (or watched) less than {2} h ago' -f $label, ($ports -join ', '), $IdleHours)) }
+                continue
+            }
+            $why += '; nothing connected to its DevTools port for {0} h' -f $IdleHours
+        }
+        $tree = Get-DcProcTree $kids $p
+        $n = if ($dry) { $tree.Count } else { Stop-DcProcTree $tree }
+        [void]$acts.Add(('{0} a leftover {1} browser (pid {2}, {3} processes): {4}' -f $stopV, $p.Name, $p.Id, $n, $why))
+    }
+
+    # ---- stale dev servers
+    $userTabPorts = @{}
+    foreach ($t in $tabs) {
+        if ($t.Owner -eq 'user' -and $t.Url -match '^https?://(localhost|127\.0\.0\.1|\[::1\]):(\d+)') { $userTabPorts[[int]$Matches[2]] = $true }
+    }
+    $groups = @{}
+    foreach ($lp in @($listen.Keys)) {
+        $p = $procs[[int]$lp]
+        if (-not $p -or $programs -notcontains $p.Name) { continue }
+        $ports = @($listen[$lp])
+        if (@($ports | Where-Object { $keepPorts -contains $_ }).Count) { continue }
+        if ($limited -and -not @($ports | Where-Object { $OnlyPorts -contains $_ }).Count) { continue }
+        $own = Get-DcProcOwner $procs $sessions $p $programs
+        if (@('session', 'orphan', 'user') -notcontains $own.Kind) {
+            if ($Explain) { [void]$kept.Add(('Keep {0} pid {1} on port {2}: started by {3} ({4})' -f $p.Name, $p.Id, ($ports -join ', '), $own.Via, $own.Kind)) }
+            continue
+        }
+        $rid = $own.Root.Id
+        if (-not $groups.ContainsKey($rid)) {
+            $groups[$rid] = [pscustomobject]@{ Owner = $own; Keys = New-Object System.Collections.ArrayList; Ports = New-Object System.Collections.ArrayList }
+        }
+        foreach ($port in $ports) { [void]$groups[$rid].Keys.Add(('{0}:{1}' -f $lp, $port)); [void]$groups[$rid].Ports.Add($port) }
+    }
+    foreach ($g in $groups.Values) {
+        $root = $g.Owner.Root
+        $portText = (@($g.Ports | Sort-Object -Unique) -join ', ')
+        $label = '{0} pid {1} on port {2}' -f $root.Name, $root.Id, $portText
+        $tree = Get-DcProcTree $kids $root
+        $boot = @($tree | ForEach-Object { Get-DcScriptArg $_ } | Where-Object { $_ -and $autostart.Contains($_) })
+        if ($boot.Count) {
+            if ($Explain) { [void]$kept.Add(('Keep {0}: starts at Windows sign-in ({1})' -f $label, $boot[0])) }
+            continue
+        }
+        $age = $now - $root.Start.ToUniversalTime()
+        if ($age.TotalHours -lt $IdleHours) {
+            if ($Explain) { [void]$kept.Add(('Keep {0}: started {1} ago' -f $label, (Format-DcAge $age))) }
+            continue
+        }
+        $known = $false; $last = $null; $userUse = $false; $userTab = $false; $watched = $null
+        if ($net -and $net.servers) {
+            foreach ($key in $g.Keys) {
+                $e = $net.servers.PSObject.Properties[$key]
+                if (-not $e) { continue }
+                $known = $true; $e = $e.Value
+                $first = ConvertFrom-DcIso $e.firstSeen
+                if ($first -and (-not $watched -or $first -lt $watched)) { $watched = $first }
+                $t = ConvertFrom-DcIso $e.lastActive
+                if (-not $t) { $t = $first }
+                if (-not $last -or $t -gt $last) { $last = $t }
+                if ($e.clients) {
+                    foreach ($c in $e.clients.PSObject.Properties) {
+                        $seenAt = ConvertFrom-DcIso $c.Value.lastSeen
+                        if ($seenAt -and ($now - $seenAt).TotalHours -lt $IdleHours -and (Test-DcUserBrowser $procs ([int]$c.Name) ([string]$c.Value.name))) { $userUse = $true }
+                    }
+                }
+            }
+        }
+        foreach ($port in $g.Ports) { if ($userTabPorts.ContainsKey([int]$port)) { $userTab = $true } }
+        if (-not $known) {
+            if ($Explain) { [void]$kept.Add(('Keep {0}: no connection record yet (the watcher runs in Dev Control); started by {1}' -f $label, $g.Owner.Kind)) }
+            continue
+        }
+        # Who used it is only known for the time the watcher has seen it (Dev Control restarted): watch a while first.
+        $need = [Math]::Min($IdleHours, 1.0)
+        if (($now - $watched).TotalHours -lt $need) {
+            if ($Explain) { [void]$kept.Add(('Keep {0}: watched for {1} so far, {2} h needed' -f $label, (Format-DcAge ($now - $watched)), $need)) }
+            continue
+        }
+        if ($userUse -or $userTab) {
+            $reason = if ($userTab) { 'a tab you navigated is on it' } else { 'your browser used it in the last {0} h' -f $IdleHours }
+            if ($Explain) { [void]$kept.Add(('Keep {0}: {1}' -f $label, $reason)) }
+            continue
+        }
+        $why = @()
+        $quiet = $now - $last
+        if ($quiet.TotalHours -ge $IdleHours) { $why += ('no connection for {0}' -f (Format-DcAge $quiet)) }
+        # An orphan (its shell ended, e.g. a server backgrounded with &) may still serve a running session: only its
+        # own connections decide. A session's server also goes when that session has been idle that long.
+        if ($g.Owner.Kind -eq 'session') {
+            $ss = $g.Owner.Session
+            if (-not $ss.Busy -and ($now - $ss.Since).TotalHours -ge $IdleHours) { $why += ('its Claude session "{0}" idle for {1}' -f $ss.Name, (Format-DcAge ($now - $ss.Since))) }
+        }
+        if (-not $why.Count) {
+            if ($Explain) { [void]$kept.Add(('Keep {0}: last connection {1} ago, started by {2}' -f $label, (Format-DcAge $quiet), $(if ($g.Owner.Session) { 'session "' + $g.Owner.Session.Name + '"' } else { $g.Owner.Kind }))) }
+            continue
+        }
+        $n = if ($dry) { $tree.Count } else { Stop-DcProcTree $tree }
+        [void]$acts.Add(('{0} the dev server on port {1} ({2} pid {3}, {4} process{5}): {6}' -f $stopV, $portText, $root.Name, $root.Id, $n, $(if ($n -eq 1) { '' } else { 'es' }), ($why -join '; ')))
+    }
+
+    # ---- leftover tabs in the automation Chrome
+    if ($tabs.Count) {
+        $keepTabs = @($s.cleanerKeepTabs | ForEach-Object { [string]$_ })
+        $cands = @($tabs | Where-Object {
+            $u = $_.Url
+            (@('auto', 'unknown') -contains $_.Owner) -and $_.Since -and (($now - $_.Since).TotalHours -ge $IdleHours) -and
+            ($u -notmatch '^(devtools|chrome-extension)://') -and -not @($keepTabs | Where-Object { $u -like $_ }).Count
+        })
+        if ($cands.Count -and $cands.Count -ge $tabs.Count) { $cands = @($cands | Sort-Object Since | Select-Object -SkipLast 1) }
+        if ($Explain) {
+            foreach ($t in $tabs) {
+                if (@($cands | Where-Object { $_.Id -eq $t.Id }).Count) { continue }
+                [void]$kept.Add(('Keep tab "{0}" ({1}): {2}, unchanged for {3}' -f (Get-DcShort $t.Title 50), (Get-DcShort $t.Url 70), $t.Owner, $(if ($t.Since) { Format-DcAge ($now - $t.Since) } else { '?' })))
+            }
+        }
+        $watching = ('DevControl.Cleaner.Watch' -as [type]) -and ([DevControl.Cleaner.Watch]::TabStatus -like 'following*')
+        if ($cands.Count -and ($watching -or $dry)) {
+            $wc = New-Object Net.WebClient
+            $wc.Proxy = $null
+            $base = 'http://127.0.0.1:{0}/json' -f [int]$s.cleanerChromePort
+            $live = @{}
+            try { $list = $wc.DownloadString("$base/list") | ConvertFrom-Json; foreach ($t in $list) { $live[[string]$t.id] = [string]$t.url } } catch { $live = $null }
+            if ($live) {
+                foreach ($t in $cands) {
+                    if (-not $live.ContainsKey($t.Id) -or $live[$t.Id] -ne $t.Url) { continue }   # closed or changed since the watcher wrote
+                    if (-not $dry) { try { [void]$wc.DownloadString("$base/close/$($t.Id)") } catch { continue } }
+                    [void]$acts.Add(('{0} the tab "{1}" ({2}): automation left it {3} ago' -f $closeV, (Get-DcShort $t.Title 60), (Get-DcShort $t.Url 80), (Format-DcAge ($now - $t.Since))))
+                }
+            }
+        }
+    }
+
+    # ---- kernel memory: one warning per Windows start
+    $gb = [double]$s.kernelPoolWarnGB
+    if ($gb -gt 0) {
+        $bytes = [DevControl.Cleaner.Mem]::KernelPoolBytes()
+        $boot = (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime).LastBootUpTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm')
+        if ($bytes -ge $gb * 1GB -and $warnedBoot -ne $boot) {
+            $warn = 'Windows kernel memory is at {0:N1} GB (normal is about 1.5 GB): a driver is leaking again, and a restart clears it. This shows once until the next restart.' -f ($bytes / 1GB)
+            if (-not $dry) { $warnedBoot = $boot }
+        }
+    }
+
+    $keepOrphans = [ordered]@{}
+    foreach ($k in $seenOrphans.Keys) { $keepOrphans[$k] = $orphans[$k].ToString('o') }
+    $out = [ordered]@{ updated = $now.ToString('o'); poolWarnedBoot = $warnedBoot; orphans = $keepOrphans }
+    try { [IO.File]::WriteAllText((Join-Path $script:DcDataDir 'cleaner-state.json'), ($out | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false)) } catch { }
+    foreach ($a in $acts) { Write-DcFile 'cleaner.log' ("{0:yyyy-MM-dd HH:mm:ss}  {1}" -f (Get-Date), $a) }
+    [pscustomobject]@{ Actions = $acts.ToArray(); Kept = $kept.ToArray(); Warn = $warn; DryRun = $dry }
 }

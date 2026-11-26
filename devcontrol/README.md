@@ -28,8 +28,11 @@ One window: a header bar (WSL and VS Code), a search bar, tabs, and the project 
   - **Switch to** *mode* (running, another mode picked): asks, then restarts WSL in that mode.
   - **Stop WSL** (while running): asks, then runs `wsl --shutdown` (frees the VM's memory and CPU). If WSL
     is still up, or boots straight back up, it retries with `wsl --shutdown --force`, then offers a force
-    stop with admin rights (`hcsdiag kill` on the WSL VM). Task Manager cannot end `vmmemWSL`. See
-    FIX-010 in the repo's `docs/fixes.md`.
+    stop with admin rights (`hcsdiag kill` on the WSL VM; it also restarts the WSL service when `wsl.exe`
+    no longer answers). Task Manager cannot end `vmmemWSL`. See FIX-010 in the repo's `docs/fixes.md`.
+  - **WSL not responding** (red): `wsl.exe` calls time out. Start WSL then offers the force stop instead of
+    failing with a bare timeout, and with no WSL VM running the app offers it by itself after about a
+    minute (a hung WSL service, FIX-032).
   - **VS Code**: penguin = new empty Linux VS Code window (boots WSL first if needed); Windows logo = new
     empty local Windows VS Code window (no WSL needed); **Quit (n)** (only while Linux VS Code runs)
     closes every VS Code window inside WSL (SIGTERM, SIGKILL after 20 s).
@@ -42,7 +45,9 @@ One window: a header bar (WSL and VS Code), a search bar, tabs, and the project 
 - **Tabs**: All, Running, one per group (in `groups` order, empty groups included), Ungrouped and
   Hidden (when they have anything), **+ New group**. Each shows its count.
 - **Projects**: every folder under `projectsRoot` (a Linux path) is listed; `projects.json` only adds
-  metadata. Pinned projects come first, then the most recently used (or A-Z: the sort button right of
+  metadata, plus projects kept elsewhere (`path`). Projects on a Windows path are read on Windows, so
+  they stay current while WSL is stopped, and opening one (Code, or Run when it has no compose or tools)
+  does not start WSL. Pinned projects come first, then the most recently used (or A-Z: the sort button right of
   the tabs). "Recently used" is the later of the last Run / VS Code / Open from Dev Control and the
   folder's own last activity (last git commit, else newest file). Each row shows status, group and age;
   click it for details: compose containers **and** background tools nested underneath, with CPU/RAM
@@ -143,7 +148,40 @@ Restart the app after editing.
 | `codePath` | `""` | Path to Windows `code.cmd` (windows flavor), when it is not on PATH. |
 | `trayIcon` / `minimizeToTray` / `closeToTray` | `true` / `true` / `false` | Tray behavior. |
 | `keepAlive` | `true` | Holds a hidden `wsl.exe ... sleep infinity` session so WSL does not idle out when you close terminals. `wsl --shutdown` ends it. |
-| `statusRefreshSeconds` / `containerRefreshSeconds` / `projectRefreshSeconds` | `3` / `10` / `30` | Refresh intervals. |
+| `statusRefreshSeconds` / `containerRefreshSeconds` / `projectRefreshSeconds` | `3` / `10` / `30` | Refresh intervals. The status check starts no program while the WSL VM is down. |
+| `wslQuerySeconds` | `30` | With the WSL VM up, how often the status check asks `wsl.exe --list --running` (every check until the distro reports running). |
+| `cleanerEnabled` | `true` | The cleaner (below). |
+| `cleanerIdleHours` | `4` | How long a dev server, leftover browser or automation tab must be idle before the cleaner acts. |
+| `cleanerCheckMinutes` | `10` | How often the cleaner checks (first check a minute after start). |
+| `cleanerDryRun` | `false` | `true`: only log what it would do. |
+| `cleanerChromePort` | `9222` | DevTools port of the automation Chrome whose leftover tabs it closes. That Chrome itself is never stopped. |
+| `cleanerKeepPorts` | `[]` | Listening ports never stopped. |
+| `cleanerKeepTabs` | `[]` | URL patterns (`-like`, e.g. `https://business.google.com/*`) never closed. |
+| `cleanerServerPrograms` | `node, workerd, python, pythonw, bun, deno, php, ruby` | Programs that count as dev servers when they listen on a port. |
+| `kernelPoolWarnGB` | `6` | One tray warning per Windows start when the kernel pools pass this (a leaking driver; normal is about 1.5 GB). `0` = off. |
+
+## Cleaner
+Every `cleanerCheckMinutes` the app stops stale dev servers and leftover browsers and closes leftover tabs; each
+action is a `Cleaner:` line in the log (and `%LOCALAPPDATA%\DevControl\cleaner.log`). Two watchers in the app
+process feed it without starting any program: one samples the TCP table every 30 s (`cleaner-net.json`: which
+listening ports had connections, and from which local program), the other follows the automation Chrome over
+DevTools at browser level (`cleaner-tabs.json`: every tab's URL and who last changed it).
+- **Dev servers** (a `cleanerServerPrograms` process listening on a port, stopped with the shell tree that started
+  it): when nothing connected for `cleanerIdleHours`, or the Claude Code session that started it
+  (`~/.claude/sessions`) has been idle that long. Never while your own browser (not an automation one) used it in
+  that time or a tab you navigated is on it; never what starts at Windows sign-in (Startup folder, Run keys),
+  what a session starts directly (MCP servers) or what another program owns (Adobe's node). After
+  the app starts it watches a server for up to an hour before judging it.
+- **Leftover browsers**: an automation browser whose script is gone - Playwright's (pipe, `playwright_` profile:
+  nothing can drive it again) after `cleanerIdleHours`, a headless Chrome on its own DevTools port once nothing has
+  connected to that port that long. Never the automation Chrome on `cleanerChromePort`, never your own browsers.
+- **Tabs of the automation Chrome**: a tab that automation left and nobody changed for `cleanerIdleHours`. A tab
+  whose URL changes while no DevTools client is attached (you navigated it) is yours from then on and never
+  closed; blank tabs are left alone; one tab always stays open.
+- **Kernel memory**: one tray warning per Windows start above `kernelPoolWarnGB`, then quiet until the next start.
+
+Check what it would do now, without acting (reads the app's watcher files):
+`cd $env:LOCALAPPDATA\Programs\DevControl; . .\Core.ps1; (Invoke-DcCleanup -DryRun -Explain) | Format-List`
 
 ## Modes
 `modes\balanced.wslconfig`, `coding.wslconfig`, `lightroom.wslconfig` are examples
@@ -173,7 +211,7 @@ outside `projectsRoot`, e.g. on the Windows drive). Example (see `src\projects.e
 | Key | Meaning |
 |---|---|
 | `displayName`, `description` | Title shown on the card (default: the key) and a short description. |
-| `path` | Folder of a project outside `projectsRoot`: a Linux path, or a Windows path (`C:\\...`, reached from Linux through `/mnt/c`). A project on a Windows path opens in Windows VS Code locally (no Remote - WSL) unless `codeFlavor` says otherwise. |
+| `path` | Folder of a project outside `projectsRoot`: a Linux path, or a Windows path (`C:\\...`). A Windows-path project is listed by Dev Control on Windows (git, file times) without WSL, and opens in Windows VS Code locally (no Remote - WSL, no WSL start) unless `codeFlavor` says otherwise. Its compose file and tools, if any, still run in Linux through `/mnt/c`. |
 | `codeFlavor` | `linux` / `windows`: the editor this project opens in, overriding the `codeFlavor` setting. |
 | `group` | Group (tab) the project is in. Written by the group label, drag and drop and Add projects. |
 | `mode` | Mode Run starts WSL in. Omit to use whatever mode WSL is in. |
@@ -217,7 +255,8 @@ Remove the certificate with `Uninstall-DevControl.ps1 -RemoveCertificate`.
 | Path | What |
 |---|---|
 | `src/DevControl.ps1` | UI, async job runner, tray, project Run/Stop/Restart sequences, grouping |
-| `src/Core.ps1` | all WSL/Docker/Windows logic (also loaded in background runspaces) |
+| `src/Core.ps1` | all WSL/Docker/Windows logic (also loaded in background runspaces), the cleaner pass (`Invoke-DcCleanup`) |
+| `src/Cleaner.cs` | the cleaner's watchers (TCP activity, automation Chrome tabs) and the kernel pool reading |
 | `src/MainWindow.xaml` | window layout and styles |
 | `src/EditProject.xaml`, `src/GroupMembers.xaml` | Edit details dialog; Add projects (projects-in-group checklist) |
 | `src/SelfTest.ps1` | automated UI test (`-SelfTest`) |
@@ -227,10 +266,12 @@ Remove the certificate with `Uninstall-DevControl.ps1 -RemoveCertificate`.
 | `modes/*.wslconfig` | example modes |
 | `Deploy.ps1` / `Uninstall-DevControl.ps1` | install/update / remove |
 | `tests/Run-SelfTest.ps1` | runs the self-test against the installed app |
+| `tests/Test-Cleaner.ps1` | the cleaner against fixtures only (throwaway servers on 4998/4999, a throwaway Chromium on 9333) |
 | `docs/fixes.md` | fix log |
 
 Runtime data: `%LOCALAPPDATA%\DevControl\` (`app.log`, `wsl-calls.log`, `projects-cache.json`,
-`ui-state.json`, `selftest.log`, `.wslconfig` backups).
+`ui-state.json`, `selftest.log`, `.wslconfig` backups, `cleaner.log`, `cleaner-net.json`, `cleaner-tabs.json`,
+`cleaner-state.json`).
 
 ## Testing
 **Automated:** `tests\Run-SelfTest.ps1` (WSL must be running, `projectsRoot` set, at least two modes).
@@ -239,6 +280,9 @@ fixture folders it creates in `projectsRoot` and removes afterwards, and a tempo
 It never shuts WSL down or quits VS Code (those prompts are answered No), but it pulls `alpine`,
 brings a test compose project up and down, and opens a fixture folder and an empty window in VS Code
 (close them afterwards). Exit code = number of failures; details in `%LOCALAPPDATA%\DevControl\selftest.log`.
+
+**Cleaner:** `tests\Test-Cleaner.ps1` (no WSL needed, safe while you work: it touches only its own fixtures).
+Exit code = number of failures.
 
 **Manual checklist** (the parts the self-test must not do for real). Close WSL terminals and VS Code
 windows you care about first.

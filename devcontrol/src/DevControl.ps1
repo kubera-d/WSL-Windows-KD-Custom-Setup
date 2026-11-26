@@ -105,6 +105,8 @@ $script:Containers = @()
 $script:Tools = @()                 # background tool pid files (running or exited)
 $script:VSCodeCount = 0             # Linux VS Code instances running in WSL (from Get-DcRuntime)
 $script:NetWarned = $false          # "WSL has no network" offered once per WSL run (FIX-028)
+$script:StatusFails = 0             # consecutive status checks where wsl.exe did not answer (FIX-032)
+$script:HangOffered = $false        # force stop offered for the current hang
 $script:ProjectCfg = @{}            # projects.json "projects"
 $script:ConfigMeta = $null          # projects.json top level (groups, collapsed)
 $script:View = 'all'                # tab: all | running | ungrouped | hidden | g:<group> (saved in ui-state.json)
@@ -224,17 +226,71 @@ function On-Tick {
 
 # ---------------------------------------------------------------- status
 
+# The poll checks for the WSL VM on every tick; it runs wsl.exe only while the VM is up: on every tick until the
+# distro reports running, then every wslQuerySeconds (FIX-033: it used to run wsl.exe every 3 s, ~29,000 a day).
+$script:LastWslQuery = $null
 function Start-StatusPoll {
     if (Test-Job 'status') { return }
-    Start-Bg -Name 'status' -Kind 'poll' -Work { Get-DcStatus } -Done {
+    $due = ($null -eq $script:LastWslQuery) -or (((Get-Date) - $script:LastWslQuery).TotalSeconds -ge [Math]::Max(3, [int]$settings.wslQuerySeconds))
+    $query = ($script:State.Running -ne $true) -or $due
+    Start-Bg -Name 'status' -Kind 'poll' -Work { param($q) Get-DcStatus $q } -ArgList @($query) -Done {
         param($r, $e)
-        if ($e) { Log "Status check failed: $($e.Message)"; return }
+        if ($e) {
+            Log "Status check failed: $($e.Message)"
+            if ($e.Message -like 'Timed out*') { Set-StatusHung }
+            return
+        }
+        if ($r[0].Queried) { $script:LastWslQuery = Get-Date }
+        $script:StatusFails = 0; $script:HangOffered = $false
         Set-Status $r[0]
     }
 }
 
+# ---------------------------------------------------------------- cleaner (Core.ps1 Invoke-DcCleanup, Cleaner.cs watchers)
+
+function Start-Cleaner {
+    if (-not $settings.cleanerEnabled -or $SelfTest) { return }
+    try {
+        Initialize-DcCleanerTypes
+        [DevControl.Cleaner.Watch]::Start($script:DcDataDir, [int]$settings.cleanerChromePort)
+        Log ("Cleaner on: dev servers, leftover browsers and automation tabs idle for {0} h{1}." -f $settings.cleanerIdleHours, $(if ($settings.cleanerDryRun) { ' (dry run: only logs)' } else { '' }))
+    } catch { Log "Cleaner did not start: $($_.Exception.Message)" }
+}
+
+function Start-Cleanup {
+    if (-not $settings.cleanerEnabled -or $SelfTest -or (Test-Job 'cleanup')) { return }
+    Start-Bg -Name 'cleanup' -Kind 'poll' -Work { Invoke-DcCleanup } -Done {
+        param($r, $e)
+        if ($e) { Log "Cleaner failed: $($e.Message)"; return }
+        $res = $r[0]
+        if (-not $res) { return }
+        foreach ($a in @($res.Actions)) { Log "Cleaner: $a" }
+        if ($res.Warn) {
+            Log $res.Warn
+            if ($script:Tray) { $script:Tray.ShowBalloonTip(20000, 'Dev Control', $res.Warn, [System.Windows.Forms.ToolTipIcon]::Warning) }
+        }
+    }
+}
+
+# wsl.exe stopped answering (FIX-027 hung kernel, FIX-032 hung WSL service). Show it instead of the last known
+# state. With no VM at all (hung service, nothing in Linux to lose) offer the force stop once after ~1 min - it
+# restarts the service. With a VM up, only the user decides (Stop WSL, Fix WSL): Linux work could be lost.
+# Since FIX-033 the poll asks wsl.exe only while the VM is up, so a hung service with no VM shows as stopped;
+# Start WSL's pre-check (Start-DcWslBoot) then reports 'WSL is not responding' and offers the force stop.
+function Set-StatusHung {
+    $script:StatusFails++
+    if ($script:Busy) { return }
+    $ui.WslDot.Fill = Get-Brush '#EF4444'; $ui.WslText.Text = 'WSL not responding'
+    if ($script:StatusFails -lt 3 -or $script:HangOffered -or $SelfTest) { return }
+    if ($script:PendingLifecycle -or $script:Seq) { return }
+    if (Get-Process -Name 'vmmemWSL' -ErrorAction SilentlyContinue) { return }
+    $script:HangOffered = $true
+    Invoke-ForceStopFlow $null $false 'WSL is not responding'
+}
+
 function Set-Status($st) {
     $was = $script:State.Running
+    if ($null -eq $st.Running) { $st.Running = [bool]$was }   # VM up, not asked this time: unchanged (FIX-033)
     $script:State.Running = [bool]$st.Running
     $script:State.Mode = $st.Mode
     $script:State.MemoryBytes = $st.MemoryBytes
@@ -268,6 +324,7 @@ function Set-Status($st) {
         $ui.LiveText.Text = ''
         if ($script:Projects.Count -eq 0) { $script:Projects = @(Get-DcProjectCache) }
         $script:ProjectsCached = $true
+        Update-Projects   # projects on the Windows drive are read on Windows, WSL or not
     }
     Update-Enablement
 }
@@ -556,7 +613,7 @@ function Get-ProjectRows {
         $r.IsRunning = $run -and ($cs.Count + $nt -gt 0)
         $op = $script:ProjectOps[$p.Name]
         if ($op) { $r.Status = "$op..."; $r.ShortStatus = $r.Status; $r.StatusText = $r.Status; $r.StatusColor = '#3B82F6' }
-        elseif (-not $run) { $r.Status = 'WSL stopped'; $r.ShortStatus = 'WSL stopped'; $r.StatusText = 'Stopped'; $r.StatusColor = '#6B7280' }
+        elseif (-not $run -and -not ((Test-DcWindowsPath $cpath) -and -not $r.ShowRun)) { $r.Status = 'WSL stopped'; $r.ShortStatus = 'WSL stopped'; $r.StatusText = 'Stopped'; $r.StatusColor = '#6B7280' }
         elseif ($r.IsRunning) {
             $parts = @(); if ($cs.Count) { $parts += "$($cs.Count) container(s)" }; if ($nt) { $parts += "$nt tool(s)" }
             $r.ShortStatus = $parts -join ', '; $r.Status = "running  -  $($r.ShortStatus)"; $r.StatusText = 'Running'; $r.StatusColor = '#22C55E'
@@ -761,7 +818,7 @@ function Show-Projects {
         else { 'No projects yet.' }
     $ui.EmptyState.Visibility = if ($rows.Count -eq 0) { 'Visible' } else { 'Collapsed' }
     $ui.ProjectsHint.Text = if ($script:ConfigError) { $script:ConfigError }
-        elseif ($settings.projectsRoot -and $script:State.Running -eq $false) { 'WSL is stopped. Run starts it in the project''s mode; the list is from the last time it ran.' }
+        elseif ($settings.projectsRoot -and $script:State.Running -eq $false) { 'WSL is stopped. Run starts it in the project''s mode; Linux projects are listed as they were the last time it ran (projects on the Windows drive are current and open without WSL).' }
         else { '' }
     $ui.ProjectsHint.Visibility = if ($ui.ProjectsHint.Text) { 'Visible' } else { 'Collapsed' }
     Update-TrayRunMenu
@@ -771,7 +828,27 @@ function Show-Projects {
 
 function Update-Projects {
     if (-not $settings.projectsRoot) { return }   # nothing to list; Show-Projects says why
-    if (-not $script:State.Running -or $script:Busy -or $script:PendingLifecycle -or (Test-Job 'projects')) { return }
+    if ($script:Busy -or $script:PendingLifecycle -or (Test-Job 'projects')) { return }
+    if (-not $script:State.Running) {
+        # WSL stopped: refresh only the projects on a Windows path (read on Windows, no wsl.exe); the
+        # Linux ones stay as they were in the cache. ProjectsCached stays true (no New badges).
+        if ($null -eq $script:State.Running) { return }   # first status check still pending
+        Start-Bg -Name 'projects' -Kind 'data' -Work {
+            $cfg = Get-DcProjectConfig
+            $win = @(Get-DcWindowsProjects $cfg)
+            $names = @($win | ForEach-Object { $_.Name })
+            $keep = @(Get-DcProjectCache | Where-Object { $_ -and $names -notcontains $_.Name -and -not (Test-DcWindowsProject $_.Name $cfg) })
+            $p = @(@($keep) + @($win) | Sort-Object Name)
+            Save-DcProjectCache $p; $p
+        } -Done {
+            param($r, $e)
+            if ($e) { Log "Project list (Windows projects) failed: $($e.Message)"; return }
+            if ($script:State.Running) { return }   # WSL came up meanwhile; the full listing takes over
+            $script:Projects = @($r | Where-Object { $_ })
+            Show-Projects
+        }
+        return
+    }
     Start-Bg -Name 'projects' -Kind 'data' -Work { $p = Get-DcProjects; Save-DcProjectCache $p; $p } -Done {
         param($r, $e)
         if ($e) { if ($script:State.Running) { Log "Project list failed: $($e.Message)" }; return }
@@ -874,7 +951,7 @@ function Invoke-Lifecycle($p) {
         $script:State.Running = $null   # force a fresh transition so lists reload
         Start-StatusPoll
         Update-Enablement
-        if ($e -and $e.Message -like 'WSL did not stop*') { Invoke-ForceStopFlow $c.Then ($c.Type -eq 'start'); return }
+        if ($e -and ($e.Message -like 'WSL did not stop*' -or $e.Message -like 'WSL is not responding*')) { Invoke-ForceStopFlow $c.Then ($c.Type -eq 'start') $e.Message; return }
         if (-not $e -and ($r -join ' ') -like "*$($script:DcNoNetworkMsg)*" -and -not $SelfTest) {
             $script:NetWarned = $true
             Invoke-NetworkRepairFlow -Auto -Then $c.Then; return
@@ -909,7 +986,7 @@ function Invoke-NetworkRepairFlow([scriptblock]$Then, [switch]$Auto) {
         $script:State.Running = $null
         Start-StatusPoll
         Update-Enablement
-        if ($e -and $e.Message -like 'WSL did not stop*') { Invoke-ForceStopFlow $c.Then $false; return }
+        if ($e -and ($e.Message -like 'WSL did not stop*' -or $e.Message -like 'WSL is not responding*')) { Invoke-ForceStopFlow $c.Then $false $e.Message; return }
         $still = -not $e -and ($r -join ' ') -like "*$($script:DcNoNetworkMsg)*"
         if ($still) { Log 'WSL still has no network after the repair. Restart Windows (Start > Power > Restart), then start WSL from Dev Control.' }
         $script:NetWarned = $true
@@ -917,9 +994,12 @@ function Invoke-NetworkRepairFlow([scriptblock]$Then, [switch]$Auto) {
     }
 }
 
-# Offered when wsl --shutdown (and --shutdown --force) left WSL running. Needs admin (UAC).
-function Invoke-ForceStopFlow([scriptblock]$Then, [bool]$WasRestart) {
-    $msg = "WSL did not stop.`n`nForce-stop it? This ends the WSL virtual machine directly " +
+# Offered when wsl --shutdown (and --shutdown --force) left WSL running, or when wsl.exe no longer answers at
+# all (hung WSL service, FIX-032). Needs admin (UAC).
+function Invoke-ForceStopFlow([scriptblock]$Then, [bool]$WasRestart, [string]$Why = '') {
+    $head = $(if ($Why -like 'WSL is not responding*') { "WSL is not responding: every wsl.exe call times out, so WSL can neither start nor stop." }
+              else { 'WSL did not stop.' })
+    $msg = "$head`n`nForce-stop it? This ends the WSL virtual machine directly and restarts the WSL service if it hangs " +
            "(Windows asks for administrator permission). Unsaved work in Linux is lost.`n`n" +
            "Task Manager cannot end vmmemWSL; this is the way to stop it without restarting Windows."
     if (-not (Confirm-Dc $msg 'Force stop WSL')) { Log 'Force stop cancelled.'; if ($Then) { & $Then $false }; return }
@@ -933,8 +1013,8 @@ function Invoke-ForceStopFlow([scriptblock]$Then, [bool]$WasRestart) {
         $script:State.Running = $null
         Start-StatusPoll
         Update-Enablement
-        # A mode switch stopped here: WSL is down but not started in the new mode.
-        if ($c.WasRestart -and -not $e) { Log 'Start WSL again to switch modes.' }
+        # A start or mode switch stopped here: WSL is down, not started (in the new mode).
+        if ($c.WasRestart -and -not $e) { Log 'WSL is stopped now - start it again.' }
         if ($c.Then) { & $c.Then ((-not $e) -and -not $c.WasRestart) }
     }
 }
@@ -949,19 +1029,26 @@ function Get-SequenceSteps([string]$Kind, [string]$Name) {
     $services = @(Get-CfgValue $cfg 'services' @() | Where-Object { $_ })
     $tools = @(Get-CfgValue $cfg 'tools' @() | Where-Object { $_ })
     $mode = [string](Get-CfgValue $cfg 'mode' '')
+    $isWin = Test-DcWindowsProject $Name
     $steps = @()
     switch ($Kind) {
         'run' {
-            $steps += @{ Type = 'wsl'; Mode = $mode; Text = 'starting WSL' }
+            # A project on a Windows path with nothing to run in Linux needs no WSL: Run just opens it
+            # in its editor (Windows VS Code, locally). Compose and tools always run in Linux.
+            $needWsl = $compose -or $tools.Count -gt 0 -or -not $isWin -or (Get-DcProjectFlavor $Name) -eq 'linux'
+            if ($needWsl) { $steps += @{ Type = 'wsl'; Mode = $mode; Text = 'starting WSL' } }
             if ($compose) { $steps += @{ Type = 'compose'; Op = 'up'; Sub = $sub; Services = $services; Text = 'compose up' } }
             foreach ($t in $tools) { $steps += @{ Type = 'tool'; Tool = $t; Text = "tool: $($t.name)" } }
             if (Get-CfgValue $cfg 'openVSCode' $true) { $steps += @{ Type = 'code'; Text = 'opening VS Code' } }
         }
         { $_ -in @('code', 'codewin', 'codedef') } {
-            # Both editors open the Linux folder (Windows VS Code through Remote - WSL), so WSL comes first.
-            # codedef = the card's VS Code button: the codeFlavor setting picks the editor.
-            $fl = switch ($Kind) { 'codewin' { 'windows' } 'code' { 'linux' } default { Get-DcCodeFlavor } }
-            if (-not $script:State.Running) { $steps += @{ Type = 'wsl'; Mode = $mode; Text = 'starting WSL' } }
+            # codedef = the card's VS Code button: the project's editor (Get-DcProjectFlavor: its
+            # codeFlavor, else Windows for a Windows path, else the codeFlavor setting).
+            # Linux VS Code, and Windows VS Code on a Linux folder (Remote - WSL), need WSL first; Windows
+            # VS Code on a Windows-path project opens it locally and does not.
+            $fl = switch ($Kind) { 'codewin' { 'windows' } 'code' { 'linux' } default { Get-DcProjectFlavor $Name } }
+            $local = $fl -eq 'windows' -and $isWin
+            if (-not $script:State.Running -and -not $local) { $steps += @{ Type = 'wsl'; Mode = $mode; Text = 'starting WSL' } }
             $steps += @{ Type = 'code'; Flavor = $fl; Text = "opening $(if ($fl -eq 'windows') { 'Windows' } else { 'Linux' }) VS Code" }
         }
         'stop' {
@@ -2104,6 +2191,8 @@ $dataTimer.add_Tick({
     $script:DataSeconds++
     if ($win.IsVisible -and $script:DataSeconds % [Math]::Max(3, $settings.containerRefreshSeconds) -eq 0) { Update-Runtime }
     if ($script:DataSeconds % [Math]::Max(5, $settings.projectRefreshSeconds) -eq 0) { Update-Projects }
+    # cleaner: first pass a minute after start, then every cleanerCheckMinutes
+    if ($script:DataSeconds -eq 60 -or $script:DataSeconds % ([Math]::Max(1, [int]$settings.cleanerCheckMinutes) * 60) -eq 0) { Start-Cleanup }
 })
 
 $script:Projects = @(Get-DcProjectCache)
@@ -2115,6 +2204,7 @@ Log "Dev Control started (distro: $($settings.distro), config: $($settings.wslCo
 if (-not $settings.projectsRoot) { Log $DcNoProjectsRoot }
 if (-not (Test-Path $settings.modesDir)) { Log "No modes folder at $($settings.modesDir) - set modesDir in settings.json to use WSL modes." }
 Start-StatusPoll
+Start-Cleaner
 $tickTimer.Start(); $statusTimer.Start(); $dataTimer.Start()
 
 if ($SelfTest) { . (Join-Path $AppDir 'SelfTest.ps1') }

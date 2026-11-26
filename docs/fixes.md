@@ -340,6 +340,13 @@ fixes are in [`devcontrol/docs/fixes.md`](../devcontrol/docs/fixes.md).)
   else is caught too. The app then offers, once per WSL run, `Repair-DcWslNetwork`: stop WSL, delete the stale
   `FSE Switch` mirrored networks, `Stop-Service hns -Force` / `Start-Service hns` (elevated), start WSL again.
   Tray menu: Fix WSL network. If it still has no network after that, restart Windows.
+- **Recurrence (Nov 13):** first visible as a Claude Code login failure: after Authorize, the Windows browser showed
+  `localhost refused to connect` on `http://localhost:<port>/callback?code=...`, then the login screen showed
+  `getaddrinfo EAI_AGAIN platform.claude.com`. Linux had no `/etc/resolv.conf` and no outbound connection while
+  Windows resolved the name; Windows `localhost` did not reach Linux listeners either (with networking fallen back
+  to None there is no mirrored loopback), so the OAuth callback could not arrive. Replaying the callback URL from
+  inside Linux (`curl` to it) only works while the CLI is still listening on that port; here it had already stopped.
+  Fix: tray Fix WSL network, then log in again.
 
 ### FIX-029 - Stop WSL works, then WSL starts again by itself ~10 s later
 - **Symptom:** Dev Control logs `WSL shut down.` and, 8-10 s later, `WSL is running.` - with no BOOT call in
@@ -381,3 +388,70 @@ fixes are in [`devcontrol/docs/fixes.md`](../devcontrol/docs/fixes.md).)
   and only suggests the terminal cleanup when there are 20 or more; otherwise restarting WSL is the remedy.
 - **Open:** what else stalls WSL session creation; why Dev Control's polls leak relays; if they keep leaking, try other ways of starting wsl.exe there
   (stdin not redirected or closed later) and count the leaks.
+
+### FIX-031 - Dev Control: projects moved to the Windows drive still went through WSL
+**Date:** 2026-11-06
+- **Symptom:** two projects live on the Windows drive (`D:\Projects`, projects.json `path`), but Dev Control
+  listed them from inside Linux (`git` / `find` over `/mnt/d`), so they only refreshed while WSL ran (stale list
+  when it was stopped) and every refresh read the Dev Drive through the slow drvfs bridge. Run (tray "Run
+  project") and the card's Code button on such a project started WSL first, and the Code button took its editor
+  from the global `codeFlavor` setting (`linux`), so it could open the Windows project in Linux VS Code on
+  `/mnt/d` although the card said Windows.
+- **Cause:** `Get-DcProjects` passed Windows paths to the Linux listing script as `/mnt/<drive>` paths;
+  `Get-SequenceSteps` always added the `wsl` step for `run`, and for `codedef` used `Get-DcCodeFlavor` instead of
+  `Get-DcProjectFlavor`.
+- **Fix:** `Get-DcWindowsProjects` (Core.ps1) lists Windows-path projects on Windows (git.exe `log -1`, worktree
+  details from `.git`, else newest file 3 levels down), same object shape; the Linux script skips them (`:win`
+  marker). `Update-Projects` refreshes them while WSL is stopped and keeps the cached Linux rows. Run skips WSL
+  for a Windows-path project without compose/tools whose editor is Windows; the Code button uses the project's
+  editor and starts WSL only when that editor needs it. Checked: listing against the real projects.json, 3
+  Windows projects + 19 Linux, no duplicates, 1.6 s.
+- **Prevention:** anything that only reads a Windows-path project stays on the Windows side; `Invoke-DcLinux` is
+  for what really runs in Linux (compose, tools, Linux VS Code).
+
+### FIX-032 - WSL will not start: every wsl.exe call hangs, but WSL is not even running
+**Date:** 2026-11-18
+- **Symptom:** Start WSL fails with `FAILED: Timed out after 20s: wsl.exe --list --running --quiet`; Dev Control logs
+  `Status check failed: Timed out ...` every 21 s for days; `wsl --list --verbose` never returns; no `vmmemWSL`, no
+  `vmwp.exe`, no msrdc. A pile of `wsl.exe` processes waits forever (14 here, the oldest from the day before). The
+  force stop ended with `WSL is still running after the force stop. Restart Windows`, although WSL was not running.
+- **Cause:** the WSL service itself was hung. Nov 15 13:22: WSL was already sick (helper `wsl.exe did not answer`,
+  FIX-030); Stop WSL's `wsl --shutdown` worked, WSL came back, and `wsl --shutdown --force` then timed out after 45 s.
+  From that moment `wslservice.exe` (the same PID since the Windows boot on Nov 11) answered nothing: the VM was gone,
+  but every client (`--list`, the keep-alive boot) blocked inside the service. The force stop (FIX-010) ended
+  `wslservice` only while `vmmemWSL` existed, so with no VM it changed nothing, and its "still running" check
+  (`wsl --list`) timed out and read as running. Killing the service made all waiting `wsl.exe` exit at once
+  (`RPC_S_CALL_FAILED`).
+- **Fix:** (elevated) `Stop-Process -Name wslservice -Force`, delete the stale `FSE Switch` mirrored HNS networks
+  (6 were left), restart `hns`, `Start-Service WSLService`; then Start WSL - booted in 12 s with network and Docker.
+  Dev Control: `Stop-DcWslForce` now restarts the WSL service when the VM survives OR `wsl.exe --list` does not
+  answer within 15 s, and logs what it did (`force-stop-wsl.log`, app.log `Force stop: ...`). `Start-DcWslBoot`
+  checks first and throws `WSL is not responding`, which offers the force stop; the status poll shows **WSL not
+  responding** (red) and, with no `vmmemWSL`, offers the force stop once after 3 timed-out checks.
+- **Manual equivalent (admin PowerShell, only with no `vmmemWSL` or after `hcsdiag kill`):**
+  `Stop-Process -Name wslservice -Force; Start-Service WSLService`. A Windows restart also clears it.
+- **Prevention:** a `wsl --shutdown --force` that times out is the trigger; after one, check that `wsl --list`
+  answers before starting WSL again. Open: why `--shutdown --force` hangs the service (WSL 2.7.14).
+- **Changed by FIX-033:** the status poll no longer asks `wsl.exe` while there is no `vmmemWSL`, so a hung service
+  with no VM shows as **WSL stopped**; Start WSL's pre-check still reports `WSL is not responding` and offers the
+  force stop.
+
+### FIX-033 - Dev Control's status poll started wsl.exe every 3 seconds, all day
+**Date:** 2026-11-26
+- **Symptom:** `wsl-calls.log` had a `QUERY --list --running --quiet` line every 2-3 s whenever Dev Control ran,
+  WSL up or not (2,097 in the 76 minutes before 12:51 on Nov 26), about 29,000 `wsl.exe` starts a day plus a console
+  host for each. On Nov 25 the PC ran out of memory: the AMD graphics driver (amdkmdag.sys 32.0.22024.19001) leaked
+  two file objects on every program start (~12 GB of kernel memory after 14 days; fixed by AMD Software Adrenalin
+  Edition 26.11.2). Dev Control's poll alone accounted for ~58,000 of
+  those leaked records a day. Each poll is also a WSL session, and FIX-030's leaked `Relay` processes came one per
+  Dev Control call.
+- **Cause:** `Start-StatusPoll` ran `Get-DcStatus` > `Test-DcWslRunning` (`wsl.exe --list --running --quiet`) on every
+  `statusRefreshSeconds` tick.
+- **Fix:** `Test-DcWslVm` (is there a `vmmemWSL` process; no process started) decides first: no VM = stopped, no
+  `wsl.exe`. With the VM up the poll asks `wsl.exe` on every tick until the distro reports running, then every
+  `wslQuerySeconds` (default 30); in between `Get-DcStatus $false` returns `Running = $null` and `Set-Status` keeps
+  the last state. `Test-DcWslRunning` is unchanged (the boot pre-check and `Test-DcWslDown` need a real answer to
+  catch a hung service). Checked with WSL stopped: `Get-DcStatus $false` and `$true` both return stopped and log no
+  `wsl.exe` call.
+- **Prevention:** a background poll must not start a process when a cheaper signal answers the question; count
+  `wsl-calls.log` lines per minute after changing a poll.

@@ -35,6 +35,17 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
   the registry (`HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss` `DefaultDistribution` >
   `<guid>\DistributionName`, see `Get-DcDefaultDistro`). `wsl.exe --list --running --quiet` is the only
   query (`QUERY` in `wsl-calls.log`).
+- The background status poll (`Start-StatusPoll` > `Get-DcStatus $query`) starts NO process while the WSL VM is
+  down (`Test-DcWslVm`: no `vmmemWSL` = stopped); with the VM up it runs the query on every poll until the distro
+  reports running, then every `wslQuerySeconds` (30), and `Running = $null` in between means unchanged (FIX-033;
+  it used to start `wsl.exe` every 3 s, ~29,000 a day). `Test-DcWslRunning` itself always asks `wsl.exe`: the hung
+  service checks (`Start-DcWslBoot`, `Test-DcWslDown`) depend on it. Don't gate it.
+- The cleaner (`Invoke-DcCleanup` in Core.ps1, watchers in `src/Cleaner.cs`, rules in README "Cleaner") stops
+  processes and closes tabs. It must never start a process, never touch the automation Chrome on
+  `cleanerChromePort` itself, a browser the user started, what starts at Windows sign-in, what a Claude session
+  starts directly (MCP servers) or a tab the user navigated. A tab URL change with no DevTools client attached is
+  the user's. Test changes with `tests/Test-Cleaner.ps1` (fixtures only), never with -IdleHours 0 against real
+  processes: dry runs (`-DryRun -Explain`) only.
 - VS Code is the LINUX build by default (`codeFlavor: linux`): `Open-DcVSCode` runs
   `$HOME/.local/bin/code-linux` in WSL (installed by the repo's Linux setup, not by Dev Control; exit
   127 = missing, reported with a hint). It must add `--ozone-platform=wayland --disable-gpu` (without
@@ -46,6 +57,10 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
   `vmmemWSL`, held for 8 s (something opening `\\wsl.localhost` reboots WSL instantly). It writes
   `%LOCALAPPDATA%\DevControl\wsl-stopping`, which the WSLg Helper honours (`Start-DcWslBoot` deletes it).
   Its "WSL did not stop" error makes the UI offer `Stop-DcWslForce` (UAC, `hcsdiag kill`). FIX-010.
+  `Stop-DcWslForce` also restarts `wslservice` when the VM survives OR `wsl.exe --list` does not answer
+  within 15 s (hung service with no VM - FIX-032); its elevated output goes to `force-stop-wsl.log` and
+  app.log. "WSL is not responding" (from `Start-DcWslBoot`'s pre-check) offers the force stop too, and
+  the status poll (`Set-StatusHung`) offers it once after 3 timed-out checks when no `vmmemWSL` exists.
   Before each attempt it closes Explorer windows on `\\wsl.localhost` / `\\wsl$` folders: Explorer refreshes
   them after the shutdown and boots WSL again ~10 s later, past the 8 s check (FIX-029).
 - WSL can boot with NO network (mirrored networking falls back to none, FIX-028). `Start-DcWslBoot` and
@@ -65,9 +80,13 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
 - Project discovery is folder-driven: EVERY directory under `projectsRoot` is listed, whether or not it
   has a compose file. `projects.json` only adds metadata; a folder with no entry has no group (Ungrouped
   tab, New badge). Hide noise with the card menu's Hide, not by deleting entries.
-  Exception: an entry with `path` is listed from that folder (Linux path, or Windows path via `/mnt/<drive>`);
-  every folder path goes through `Get-DcProjectDir`, never `"$root/$Project"`. A Windows-path project opens
-  in Windows VS Code locally by default (`Get-DcProjectFlavor`).
+  Exception: an entry with `path` is listed from that folder. A Linux path is read in Linux; a Windows path
+  is read ON WINDOWS (`Get-DcWindowsProjects`: git.exe + file system, never wsl.exe or `/mnt`), so those
+  projects list and refresh while WSL is stopped (`Update-Projects` merges them into the cached Linux list).
+  Every folder path for a bash script goes through `Get-DcProjectDir` (`/mnt/<drive>` form), never
+  `"$root/$Project"`. A Windows-path project opens in Windows VS Code locally by default
+  (`Get-DcProjectFlavor`, also for the card's Code button) and its Code button / Run do not start WSL
+  unless it has compose or tools (those run in Linux) or its editor is Linux VS Code (FIX-031).
 - Compose safety: worktrees and folders sharing a compose `name:` with another folder get no compose
   unless `"compose": true` (`Get-ComposePolicy`); `Invoke-DcCompose` refuses `up`/`restart` when the
   compose name already has containers from another folder.
@@ -101,7 +120,9 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
   `distro` / `projectsRoot` when passed); seed `projects.json` once from `projects.example.json`; copy
   missing `modes/*.wslconfig`; build via `Install.ps1` when `-Build` or the exe is missing; `-Sign`
   creates/reuses + trusts the `CN=KD Dev Tools` cert and signs; Start Menu + Desktop shortcuts.
-- Invocation: `powershell -NoProfile -ExecutionPolicy Bypass -File devcontrol\Deploy.ps1 [-Destination <dir>] [-Distro <name>] [-ProjectsRoot /home/<you>/projects] [-Build] [-Sign] [-NoDesktopShortcut]`
+- Invocation: `powershell -NoProfile -ExecutionPolicy Bypass -File devcontrol\Deploy.ps1 [-Destination <dir>] [-Distro <name>] [-ProjectsRoot /home/<you>/projects] [-Build] [-Sign] [-NoDesktopShortcut] [-StartAtSignIn]`
+- `-StartAtSignIn` (2026-11-26): `Startup\Dev Control.lnk` with `-Minimized` (tray only), so the cleaner runs whenever
+  the user is signed in. Remove: delete that shortcut.
 - From WSL: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w devcontrol/Deploy.ps1)"`
 - Safe while the app runs: icons are swapped via temp files (kept if locked); the exe is compiled to
   `%TEMP%\devcontrol-build` and swapped in (clear error if locked). A running instance keeps the old
@@ -136,11 +157,24 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
 - If it prints "no fresh selftest.log", the app crashed at startup - run
   `powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%LOCALAPPDATA%\Programs\DevControl\DevControl.ps1" -SelfTest` to see the error.
 
+### tests/Test-Cleaner.ps1
+- Path: `tests/Test-Cleaner.ps1` - Fix log: `docs/fixes.md`
+- Purpose: the cleaner against fixtures only: throwaway node servers on 127.0.0.1:4998/4999, a throwaway headless
+  Chromium on DevTools port 9333 (temp profile, stands in for the automation Chrome), two orphaned headless
+  Chromiums (a `playwright_` profile; one on port 9334), a temp settings.json; `-OnlyPorts` / `-OnlyPids` keep it
+  off everything else. Checks tab ownership (script-opened / blank / user-navigated / attached-driven), which tabs
+  close, which server stops (the one with a user tab on it stays), both leftover browsers, the one-time kernel
+  warning, dry run. ~1.5 min (waits for the watcher's first TCP save). No WSL needed; safe while the app runs.
+- Invocation: `powershell -NoProfile -ExecutionPolicy Bypass -File devcontrol\tests\Test-Cleaner.ps1` (exit code = failures)
+- Needs: node on PATH, a Playwright Chromium in `%LOCALAPPDATA%\ms-playwright`, ports 4998/4999/9333/9334 free.
+
 ### Running / inspecting the installed app (only when the user asks)
 - Launch like a double-click: `explorer.exe "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Dev Control.lnk"`.
 - Close it: `Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | ? { $_.CommandLine -like '*DevControl.ps1*' } | % { Stop-Process -Id $_.ProcessId }`
 - Core functions ad hoc (Windows-only ones are safe; anything calling `Invoke-DcLinux` needs WSL running):
   `cd $env:LOCALAPPDATA\Programs\DevControl; . .\Core.ps1; Get-DcSettings; Get-DcStatus`
+- What the cleaner would do now (reads the running app's watcher files, acts on nothing):
+  `cd $env:LOCALAPPDATA\Programs\DevControl; . .\Core.ps1; (Invoke-DcCleanup -DryRun -Explain) | Format-List`
 
 ## Key file map
 - `src/Core.ps1` - settings, WSL state, modes, lifecycle, project listing (worktrees, compose names),
@@ -154,8 +188,12 @@ on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is a
   dropping a row on one runs `Invoke-TabDrop`. A list rebuild is skipped while `$script:Dragging`.
 - `src/GroupMembers.xaml` - Add projects checklist (`Show-GroupMembers` > `Set-GroupMembers`); `src/EditProject.xaml` - Edit details
 - `src/SelfTest.ps1` - the `-SelfTest` driver (fixtures, steps, cleanup)
+- `src/Cleaner.cs` - the cleaner's watchers, compiled at start by `Initialize-DcCleanerTypes` (Add-Type, C# 5,
+  System.Web.Extensions for JSON): TCP sampler (`cleaner-net.json`), automation Chrome tab follower over the
+  browser-level DevTools socket (`cleaner-tabs.json`), kernel pool bytes (GetPerformanceInfo)
 - `modes/*.wslconfig` - example modes, copied to `<install>\modes` only when missing
-- Runtime logs: `%LOCALAPPDATA%\DevControl\app.log`, `wsl-calls.log`, `selftest.log`
+- Runtime logs: `%LOCALAPPDATA%\DevControl\app.log`, `wsl-calls.log`, `selftest.log`, `cleaner.log`; cleaner state
+  `cleaner-net.json`, `cleaner-tabs.json` (watchers), `cleaner-state.json` (orphan first-seen times, kernel warning)
 
 ## Environment assumptions
 - Windows 10/11, Windows PowerShell 5.1, WSL2 with systemd; Docker Engine native in the distro
