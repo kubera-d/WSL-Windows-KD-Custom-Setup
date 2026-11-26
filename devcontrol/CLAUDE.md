@@ -27,6 +27,12 @@ Get-ChildItem -Recurse -Include *.ps1 | % { $e = $null; [void][System.Management
 on `src/MainWindow.xaml` (in an STA PowerShell, without showing the window) is also safe.
 
 ## Hard rules
+- **This repo is PUBLIC: no personal or business details anywhere** (root `CLAUDE.md` "Public repo: no personal
+  data"). Fix-log entries, comments, README and tests read for anyone: no project, client or business names, no
+  paths into the maintainer's folders, no machine or incident details tied to a person. Keep exact errors,
+  versions and commands; write the rest generically and put the specifics in `local-notes/` (git-ignored). The
+  pre-commit hook (`tools/check-public.sh` with the local `.git/private-words`) blocks the known words; add a new
+  private name there when one comes up, and never commit with `--no-verify`.
 - Any `wsl.exe` call that executes something in Linux boots WSL. All such calls go through
   `Invoke-DcLinux` (guarded by `Test-DcWslRunning`). Only `Start-DcWslBoot` boots on purpose;
   `Open-DcVSCode` boots too (VS Code runs in / connects to Linux), so the VS Code button runs a `code`

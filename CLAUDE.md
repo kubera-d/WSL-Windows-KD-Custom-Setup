@@ -13,6 +13,11 @@ Dev Control has its own developer guide: `devcontrol/CLAUDE.md`.
   `git config core.hooksPath tools/hooks`) blocks private-looking files, API-key patterns and the words in
   the local, never-committed `.git/private-words` (maintainer's usernames, paths, project folder names).
   Never bypass it with `--no-verify`.
+  This covers fix-log entries (`docs/fixes.md`, `devcontrol/docs/fixes.md`), code comments, READMEs and tests
+  too: describe an incident so it reads for anyone ("two projects on the Windows drive", "a tool started from the
+  Startup folder", "the PC"), keep exact error messages, versions and commands, and put the maintainer-specific
+  details (which projects, which machine, which business tool) in `devcontrol/local-notes/` (git-ignored). A new
+  private name that comes up goes into `.git/private-words` the same day.
 - **Never run `wsl --shutdown` / `wsl --terminate`, never kill `code` processes in WSL, and never click-test
   Dev Control's Stop WSL / Quit VS Code for real** - Claude Code usually runs inside Linux VS Code in
   WSL, so any of these kills the session. Restarting `msrdc.exe` is safe (Linux apps survive).
